@@ -68,55 +68,6 @@ interface TranscriptionResult {
   language?: string;
 }
 
-// Audio compression transform stream
-class AudioCompressor extends Transform {
-  private ffmpeg: any;
-
-  constructor() {
-    super();
-    const pass = new PassThrough();
-
-    this.ffmpeg = ffmpeg(pass)
-      .audioFrequency(16000) // Optimized for Whisper
-      .audioChannels(1) // Mono
-      .audioBitrate('128k')
-      .format('mp3')
-      .outputOptions(['-acodec', 'libmp3lame'])
-      .on('error', (err: Error) => {
-        console.error('FFmpeg error:', err);
-        this.destroy(err);
-      })
-      .on('progress', (progress: { percent?: number }) => {
-        if (progress.percent) {
-          console.log('Processing:', progress.percent.toFixed(1) + '%');
-        }
-      })
-      .on('end', () => {
-        console.log('FFmpeg processing completed');
-      });
-
-    // Handle stream events
-    this.ffmpeg.stream().on('data', (chunk: Buffer) => {
-      this.push(chunk);
-    }).on('end', () => {
-      this.push(null);
-    });
-
-    // Pipe input to FFmpeg
-    this.on('pipe', (source) => {
-      source.pipe(pass);
-    });
-  }
-
-  _transform(chunk: Buffer, encoding: BufferEncoding, callback: Function) {
-    callback();
-  }
-
-  _flush(callback: Function) {
-    callback();
-  }
-}
-
 // Utility function for exponential backoff
 async function withRetry<T>(
   operation: () => Promise<T>,
@@ -166,20 +117,19 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   const audioPath = join(tempDir, `${videoId}.mp3`);
   await cleanupFile(audioPath);
   
-  console.log(`[1/3] Starting download for video ${videoId}`);
+  console.log(`[1/2] Starting download for video ${videoId}`);
   
   try {
-    // Download with improved configuration
-    const downloadProcess = await withRetry(async () => {
-      return youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
+    // Download with direct file output
+    await withRetry(async () => {
+      await youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
         extractAudio: true,
         audioFormat: 'mp3',
         audioQuality: 0, // Best quality
-        output: '-',
+        output: audioPath,
         maxFilesize: '100M',
         matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
         noWarnings: true,
-        bufferSize: BUFFER_SIZE,
         addHeader: [
           'referer:youtube.com',
           'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
@@ -187,49 +137,41 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
       });
     });
 
-    if (!downloadProcess.stdout) {
-      throw new Error('No audio stream available from youtube-dl');
-    }
-
-    console.log('[2/3] Processing audio stream');
-
-    const compressor = new AudioCompressor();
-    const outputStream = createWriteStream(audioPath);
-
-    // Add error handlers
-    downloadProcess.stdout.on('error', (err) => {
-      console.error('Download stream error:', err);
-      throw err;
-    });
-
-    outputStream.on('error', (err) => {
-      console.error('Output stream error:', err);
-      throw err;
-    });
-
-    // Process the stream
-    await pipeline(
-      downloadProcess.stdout,
-      compressor,
-      outputStream
-    );
+    console.log('[2/2] Download complete, verifying file');
 
     // Verify the output file
     const stats = await stat(audioPath);
     if (stats.size === 0) {
-      throw new Error('Generated audio file is empty');
+      throw new Error('Downloaded audio file is empty - the video might be unavailable or private');
     }
 
     if (stats.size < 1024) { // Less than 1KB
-      throw new Error('Generated audio file is too small, likely corrupted');
+      throw new Error('Downloaded audio file is too small - the video might be corrupted or restricted');
     }
 
-    console.log(`[3/3] Audio processing complete (${stats.size} bytes)`);
+    console.log(`Audio download complete (${stats.size} bytes)`);
     return audioPath;
   } catch (error) {
     await cleanupFile(audioPath);
-    console.error('Error in audio processing:', error);
-    throw error;
+    
+    // Enhance error message based on the error type
+    let errorMessage = 'Failed to download audio: ';
+    if (error instanceof Error) {
+      if (error.message.includes('Video unavailable')) {
+        errorMessage += 'The video is unavailable or private';
+      } else if (error.message.includes('maxFilesize')) {
+        errorMessage += 'The video file is too large (max 100MB)';
+      } else if (error.message.includes('duration')) {
+        errorMessage += 'The video is too long (max 2 hours)';
+      } else {
+        errorMessage += error.message;
+      }
+    } else {
+      errorMessage += 'Unknown error occurred';
+    }
+    
+    console.error('Error in audio download:', errorMessage);
+    throw new Error(errorMessage);
   }
 }
 
