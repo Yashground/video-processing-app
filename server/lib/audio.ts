@@ -74,73 +74,54 @@ interface TranscriptionResult {
 
 // Audio compression transform stream with format support
 class AudioCompressor extends Transform {
-  private ffmpeg: any;
-  private format: AudioFormat;
-  private outputStream: PassThrough;
-  private initialized: boolean;
+  private ffmpegCommand: any;
+  private passThrough: PassThrough;
 
   constructor(format: AudioFormat = 'mp3') {
     super();
-    this.format = format;
-    this.outputStream = new PassThrough();
-    this.initialized = false;
-  }
-
-  private initializeFfmpeg() {
-    if (this.initialized) return;
-
-    const ffmpegCommand = ffmpeg()
-      .input('pipe:0')
+    this.passThrough = new PassThrough();
+    
+    this.ffmpegCommand = ffmpeg()
+      .input(this.passThrough)
       .audioQuality(0)
-      .audioBitrate('128k');
+      .audioBitrate('128k')
+      .format(format);
 
     // Format-specific configurations
-    switch (this.format) {
+    switch (format) {
       case 'mp3':
-        ffmpegCommand
-          .outputFormat('mp3')
-          .outputOptions(['-acodec', 'libmp3lame']);
+        this.ffmpegCommand.outputOptions(['-acodec', 'libmp3lame']);
         break;
       case 'm4a':
-        ffmpegCommand
-          .outputFormat('m4a')
-          .outputOptions(['-acodec', 'aac']);
+        this.ffmpegCommand.outputOptions(['-acodec', 'aac']);
         break;
       case 'wav':
-        ffmpegCommand
-          .outputFormat('wav')
-          .outputOptions(['-acodec', 'pcm_s16le']);
+        this.ffmpegCommand.outputOptions(['-acodec', 'pcm_s16le']);
         break;
     }
 
-    ffmpegCommand
+    // Set up error handling
+    this.ffmpegCommand
       .on('error', (err: Error) => {
-        console.error(`FFmpeg ${this.format} streaming error:`, err);
+        console.error(`FFmpeg streaming error:`, err);
         this.emit('error', err);
       })
       .on('progress', (progress: { percent?: number }) => {
-        console.log(`FFmpeg ${this.format} streaming progress:`, progress.percent?.toFixed(1) + '%');
-      })
-      .on('end', () => {
-        console.log(`FFmpeg ${this.format} processing completed`);
+        if (progress.percent) {
+          console.log('Processing:', progress.percent.toFixed(1) + '%');
+        }
       });
 
-    ffmpegCommand.pipe(this.outputStream);
-    
-    // Pipe the output stream back to transform stream
-    this.outputStream.on('data', (chunk) => this.push(chunk));
-    this.outputStream.on('end', () => this.push(null));
-    
-    this.ffmpeg = ffmpegCommand;
-    this.initialized = true;
+    // Pipe FFmpeg output to transform stream
+    this.ffmpegCommand
+      .pipe()
+      .on('data', (chunk: Buffer) => this.push(chunk))
+      .on('end', () => this.push(null));
   }
 
   _transform(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
     try {
-      if (!this.initialized) {
-        this.initializeFfmpeg();
-      }
-      this.ffmpeg.write(chunk);
+      this.passThrough.write(chunk);
       callback();
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
@@ -149,10 +130,7 @@ class AudioCompressor extends Transform {
 
   _flush(callback: (error?: Error | null) => void) {
     try {
-      if (!this.initialized) {
-        this.initializeFfmpeg();
-      }
-      this.ffmpeg.end();
+      this.passThrough.end();
       callback();
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
@@ -161,10 +139,10 @@ class AudioCompressor extends Transform {
 
   _destroy(error: Error | null, callback: (error: Error | null) => void) {
     try {
-      if (this.ffmpeg) {
-        this.ffmpeg.kill('SIGKILL');
+      if (this.ffmpegCommand) {
+        this.ffmpegCommand.kill('SIGKILL');
       }
-      this.outputStream.destroy(error);
+      this.passThrough.destroy(error || undefined);
       callback(error);
     } catch (err) {
       callback(err instanceof Error ? err : new Error(String(err)));
