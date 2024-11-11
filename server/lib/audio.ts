@@ -22,6 +22,10 @@ const PARALLEL_LIMIT = 4;
 const CACHE_SIZE = 10;
 const BUFFER_SIZE = 1024 * 1024; // 1MB buffer size for streaming
 
+// Supported audio formats in order of preference
+const SUPPORTED_FORMATS = ['mp3', 'm4a', 'wav'] as const;
+type AudioFormat = typeof SUPPORTED_FORMATS[number];
+
 // Simple in-memory LRU cache for processed segments
 class SegmentCache {
   private cache: Map<string, TranscriptionResult[]>;
@@ -68,55 +72,102 @@ interface TranscriptionResult {
   language?: string;
 }
 
-// Audio compression transform stream
+// Audio compression transform stream with format support
 class AudioCompressor extends Transform {
   private ffmpeg: any;
-  private passThrough: PassThrough;
+  private format: AudioFormat;
+  private outputStream: PassThrough;
+  private initialized: boolean;
 
-  constructor() {
+  constructor(format: AudioFormat = 'mp3') {
     super();
-    this.passThrough = new PassThrough();
-    
-    this.ffmpeg = ffmpeg()
-      .input(this.passThrough)
+    this.format = format;
+    this.outputStream = new PassThrough();
+    this.initialized = false;
+  }
+
+  private initializeFfmpeg() {
+    if (this.initialized) return;
+
+    const ffmpegCommand = ffmpeg()
+      .input('pipe:0')
       .audioQuality(0)
-      .audioBitrate('128k')
-      .outputOptions(['-acodec', 'libmp3lame'])
-      .format('mp3')
-      .on('error', (err) => {
-        console.error('FFmpeg streaming error:', err);
+      .audioBitrate('128k');
+
+    // Format-specific configurations
+    switch (this.format) {
+      case 'mp3':
+        ffmpegCommand
+          .outputFormat('mp3')
+          .outputOptions(['-acodec', 'libmp3lame']);
+        break;
+      case 'm4a':
+        ffmpegCommand
+          .outputFormat('m4a')
+          .outputOptions(['-acodec', 'aac']);
+        break;
+      case 'wav':
+        ffmpegCommand
+          .outputFormat('wav')
+          .outputOptions(['-acodec', 'pcm_s16le']);
+        break;
+    }
+
+    ffmpegCommand
+      .on('error', (err: Error) => {
+        console.error(`FFmpeg ${this.format} streaming error:`, err);
         this.emit('error', err);
       })
-      .on('progress', (progress) => {
-        console.log('FFmpeg streaming progress:', progress.percent?.toFixed(1) + '%');
+      .on('progress', (progress: { percent?: number }) => {
+        console.log(`FFmpeg ${this.format} streaming progress:`, progress.percent?.toFixed(1) + '%');
+      })
+      .on('end', () => {
+        console.log(`FFmpeg ${this.format} processing completed`);
       });
+
+    ffmpegCommand.pipe(this.outputStream);
+    
+    // Pipe the output stream back to transform stream
+    this.outputStream.on('data', (chunk) => this.push(chunk));
+    this.outputStream.on('end', () => this.push(null));
+    
+    this.ffmpeg = ffmpegCommand;
+    this.initialized = true;
   }
 
-  _transform(chunk: Buffer, encoding: BufferEncoding, callback: Function) {
+  _transform(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
     try {
-      this.passThrough.write(chunk);
+      if (!this.initialized) {
+        this.initializeFfmpeg();
+      }
+      this.ffmpeg.write(chunk);
       callback();
     } catch (error) {
-      callback(error);
+      callback(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-  _flush(callback: Function) {
+  _flush(callback: (error?: Error | null) => void) {
     try {
-      this.passThrough.end();
-      this.ffmpeg.pipe(this as any);
+      if (!this.initialized) {
+        this.initializeFfmpeg();
+      }
+      this.ffmpeg.end();
       callback();
     } catch (error) {
-      callback(error);
+      callback(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
-  _destroy(error: Error | null, callback: Function) {
+  _destroy(error: Error | null, callback: (error: Error | null) => void) {
     try {
-      this.passThrough.destroy(error);
+      if (this.ffmpeg) {
+        this.ffmpeg.kill('SIGKILL');
+      }
+      this.outputStream.destroy(error);
       callback(error);
     } catch (err) {
-      callback(err);
+      callback(err instanceof Error ? err : new Error(String(err)));
     }
   }
 }
@@ -161,19 +212,27 @@ async function ensureTempDir(dir: string): Promise<void> {
   }
 }
 
-// Verify FFmpeg codec availability
-async function verifyCodec(): Promise<void> {
-  return new Promise((resolve, reject) => {
+// Verify FFmpeg codec availability for format
+async function verifyCodec(format: AudioFormat): Promise<boolean> {
+  return new Promise((resolve) => {
     ffmpeg.getAvailableCodecs((err, codecs) => {
       if (err) {
-        reject(new Error('Failed to get FFmpeg codecs'));
+        resolve(false);
         return;
       }
-      if (!codecs['libmp3lame']) {
-        reject(new Error('MP3 codec (libmp3lame) is not available'));
-        return;
+      switch (format) {
+        case 'mp3':
+          resolve(!!codecs['libmp3lame']);
+          break;
+        case 'm4a':
+          resolve(!!codecs['aac']);
+          break;
+        case 'wav':
+          resolve(!!codecs['pcm_s16le']);
+          break;
+        default:
+          resolve(false);
       }
-      resolve();
     });
   });
 }
@@ -182,83 +241,80 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   const tempDir = join(process.cwd(), 'temp');
   await ensureTempDir(tempDir);
   
-  const audioPath = join(tempDir, `${videoId}.mp3`);
+  let currentFormat: AudioFormat | null = null;
+  let error: Error | null = null;
   
-  try {
-    // Verify codec availability before starting
-    await verifyCodec();
-    
-    // Clean up any existing files
-    await cleanupFile(audioPath);
-    
-    console.log(`[1/3] Starting download and processing for video ${videoId}`);
-    
-    // Download with retry mechanism and stream processing
-    const downloadProcess = await withRetry(async () => {
-      return youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
-        extractAudio: true,
-        audioFormat: 'mp3',
-        audioQuality: 7,
-        output: '-',
-        maxFilesize: '100M',
-        matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
-        noWarnings: true,
-        addHeader: [
-          'referer:youtube.com',
-          'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
-        ]
-      });
-    });
+  // Try formats in order until one works
+  for (const format of SUPPORTED_FORMATS) {
+    if (await verifyCodec(format)) {
+      try {
+        const audioPath = join(tempDir, `${videoId}.${format}`);
+        await cleanupFile(audioPath);
+        
+        console.log(`[1/3] Attempting download with ${format} format for video ${videoId}`);
+        
+        const downloadProcess = await withRetry(async () => {
+          return youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
+            extractAudio: true,
+            audioFormat: format,
+            audioQuality: 7,
+            output: '-',
+            maxFilesize: '100M',
+            matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
+            noWarnings: true,
+            addHeader: [
+              'referer:youtube.com',
+              'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
+            ]
+          });
+        });
 
-    console.log('[2/3] Audio download started, processing stream');
+        console.log(`[2/3] Processing ${format} stream`);
 
-    const compressor = new AudioCompressor();
-    const outputStream = createWriteStream(audioPath);
+        const compressor = new AudioCompressor(format);
+        const outputStream = createWriteStream(audioPath);
 
-    await pipeline(
-      downloadProcess.stdout!,
-      compressor,
-      outputStream
-    );
+        await pipeline(
+          downloadProcess.stdout!,
+          compressor,
+          outputStream
+        );
 
-    // Verify the output file
-    const stats = await stat(audioPath);
-    if (stats.size === 0) {
-      throw new Error('Generated audio file is empty');
+        // Verify the output file
+        const stats = await stat(audioPath);
+        if (stats.size === 0) {
+          throw new Error('Generated audio file is empty');
+        }
+
+        console.log(`[3/3] Audio processing complete (${stats.size} bytes)`);
+        currentFormat = format;
+        return audioPath;
+      } catch (err) {
+        error = err instanceof Error ? err : new Error(String(err));
+        console.warn(`Failed to process audio with ${format} format:`, err);
+        continue;
+      }
     }
-
-    console.log(`[3/3] Audio processing complete (${stats.size} bytes)`);
-    
-    return audioPath;
-  } catch (error: any) {
-    // Ensure cleanup happens in case of error
-    await cleanupFile(audioPath);
-    
-    console.error('Error processing audio:', error);
-    
-    if (error.stderr?.includes('Video unavailable')) {
-      throw new Error('Video is unavailable or private');
-    } else if (error.stderr?.includes('maxFilesize')) {
-      throw new Error('Video file is too large (max 100MB)');
-    } else if (error.stderr?.includes('duration')) {
-      throw new Error(`Video duration exceeds the maximum limit of ${MAX_VIDEO_DURATION / 3600} hours`);
-    } else if (error.stderr?.includes('copyright')) {
-      throw new Error('Video is not accessible due to copyright restrictions');
-    } else if (error.code === 'ENOENT') {
-      throw new Error('Failed to save audio file');
-    } else if (error.message?.includes('codec')) {
-      throw new Error('Required audio codec is not available');
-    }
-    
-    throw new Error('Failed to process video audio: ' + error.message);
   }
+  
+  // If all formats failed, throw the last error or a general error
+  if (!currentFormat) {
+    throw error || new Error('Failed to process audio with any supported format');
+  }
+  
+  throw new Error('Unexpected error in audio processing');
 }
 
-// Update splitAudio function to use mp3 format
+// Update splitAudio function to handle multiple formats
 async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
   const segments: AudioSegment[] = [];
   const tempDir = join(process.cwd(), 'temp');
   await ensureTempDir(tempDir);
+  
+  const format = audioPath.split('.').pop() as AudioFormat;
+  if (!SUPPORTED_FORMATS.includes(format)) {
+    throw new Error(`Unsupported audio format: ${format}`);
+  }
   
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(audioPath, async (err, metadata) => {
@@ -273,17 +329,31 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       try {
         const chunkPromises = Array.from({ length: numChunks }, async (_, i) => {
           const startTime = i * CHUNK_DURATION;
-          const segmentPath = join(tempDir, `${basename(audioPath, '.mp3')}_${i}.mp3`);
+          const segmentPath = join(tempDir, `${basename(audioPath, `.${format}`)}_${i}.${format}`);
           
           await cleanupFile(segmentPath);
           
           await new Promise<void>((res, rej) => {
-            ffmpeg(audioPath)
+            const command = ffmpeg(audioPath)
               .setStartTime(startTime)
               .setDuration(Math.min(CHUNK_DURATION, duration - startTime))
               .audioQuality(0)
-              .audioBitrate('128k')
-              .outputOptions(['-acodec', 'libmp3lame'])
+              .audioBitrate('128k');
+
+            // Apply format-specific settings
+            switch (format) {
+              case 'mp3':
+                command.outputOptions(['-acodec', 'libmp3lame']);
+                break;
+              case 'm4a':
+                command.outputOptions(['-acodec', 'aac']);
+                break;
+              case 'wav':
+                command.outputOptions(['-acodec', 'pcm_s16le']);
+                break;
+            }
+
+            command
               .output(segmentPath)
               .on('end', () => res())
               .on('error', (err) => {
