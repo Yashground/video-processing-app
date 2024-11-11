@@ -61,6 +61,7 @@ async function getVideoMetadata(videoId: string) {
 }
 
 export function registerRoutes(app: Express) {
+  // Existing routes...
   app.get("/api/videos", async (req, res) => {
     try {
       const videos = await db
@@ -159,12 +160,6 @@ export function registerRoutes(app: Express) {
         return res.json(existingSubtitles);
       }
 
-      // Fetch new video metadata
-      const metadata = await getVideoMetadata(videoId);
-      if (metadata.title === 'Untitled Video') {
-        return res.status(400).json({ error: "Failed to fetch video metadata" });
-      }
-
       // Process audio and generate subtitles
       try {
         audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
@@ -189,6 +184,45 @@ export function registerRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching subtitles:", error);
       res.status(500).json({ error: "Failed to fetch subtitles" });
+    }
+  });
+
+  // New translation endpoint
+  app.post("/api/translate", async (req, res) => {
+    try {
+      const { text, targetLanguage } = z.object({
+        text: z.string().min(1),
+        targetLanguage: z.string().min(2).max(5)
+      }).parse(req.body);
+
+      const translation = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          {
+            role: "system",
+            content: `You are a translation assistant. Translate the following text to ${targetLanguage}. Keep the same meaning and tone, but make it natural in the target language.`
+          },
+          {
+            role: "user",
+            content: text
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 1000
+      });
+
+      const translatedText = translation.choices[0]?.message?.content;
+      
+      if (!translatedText) {
+        throw new Error("No translation generated");
+      }
+
+      res.json({ translatedText });
+    } catch (error) {
+      console.error("Translation error:", error);
+      res.status(500).json({ 
+        error: error instanceof Error ? error.message : "Translation failed" 
+      });
     }
   });
 }

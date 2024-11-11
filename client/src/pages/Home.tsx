@@ -8,6 +8,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Form, FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form";
 import SubtitleViewer from "../components/SubtitleViewer";
 import SummaryPanel from "../components/SummaryPanel";
+import TranslationPanel from "../components/TranslationPanel";
 import HistorySidebar from "../components/HistorySidebar";
 import { useToast } from "@/hooks/use-toast";
 import { Youtube } from "lucide-react";
@@ -119,6 +120,10 @@ export default function Home() {
                 videoId={videoId} 
                 onTextUpdate={setTranscribedText}
               />
+            </Card>
+
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+              <TranslationPanel text={transcribedText} />
             </Card>
 
             <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
