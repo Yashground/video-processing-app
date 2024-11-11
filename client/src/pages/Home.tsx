@@ -8,7 +8,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Form, FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form";
 import SubtitleViewer from "../components/SubtitleViewer";
 import SummaryPanel from "../components/SummaryPanel";
-import VideoPlayer from "../components/VideoPlayer";
 import { useToast } from "@/hooks/use-toast";
 
 const urlSchema = z.object({
@@ -73,11 +72,11 @@ export default function Home() {
   };
 
   return (
-    <div className="container mx-auto p-4 min-h-screen">
-      <div className="max-w-4xl mx-auto space-y-4">
-        <Card className="p-4">
+    <div className="container mx-auto py-8 px-4 min-h-screen">
+      <div className="max-w-3xl mx-auto space-y-6">
+        <Card className="p-6 shadow-lg">
           <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-2">
+            <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-3">
               <FormField
                 control={form.control}
                 name="videoUrl"
@@ -86,6 +85,7 @@ export default function Home() {
                     <FormControl>
                       <Input 
                         placeholder="Enter YouTube URL (e.g., youtube.com/watch?v=... or youtu.be/...)" 
+                        className="h-11"
                         {...field} 
                       />
                     </FormControl>
@@ -93,25 +93,22 @@ export default function Home() {
                   </FormItem>
                 )}
               />
-              <Button type="submit">Process Audio</Button>
+              <Button type="submit" size="lg">
+                Process Audio
+              </Button>
             </form>
           </Form>
         </Card>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <Card className="h-[300px]">
-            <VideoPlayer videoId={videoId} />
-          </Card>
-          <Card>
-            <SummaryPanel text={transcribedText} />
-          </Card>
-        </div>
-
-        <Card>
+        <Card className="shadow-lg">
           <SubtitleViewer 
             videoId={videoId} 
             onTextUpdate={setTranscribedText}
           />
+        </Card>
+
+        <Card className="shadow-lg">
+          <SummaryPanel text={transcribedText} />
         </Card>
       </div>
     </div>

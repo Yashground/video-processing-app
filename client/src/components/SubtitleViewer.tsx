@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, AlertCircle } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Progress } from "@/components/ui/progress";
 
 interface Subtitle {
   start: number;
@@ -20,6 +20,7 @@ interface SubtitleViewerProps {
 
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
+  const [progress, setProgress] = useState(0);
   const { toast } = useToast();
   
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
@@ -55,14 +56,30 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, [subtitles, onTextUpdate]);
 
+  // Simulate progress during processing
+  useEffect(() => {
+    if (isValidating) {
+      const interval = setInterval(() => {
+        setProgress(p => {
+          if (p >= 90) return p;
+          return p + 1;
+        });
+      }, 500);
+      return () => clearInterval(interval);
+    } else {
+      setProgress(0);
+    }
+  }, [isValidating]);
+
   const handleRetry = () => {
     setRetryCount(count => count + 1);
+    setProgress(0);
     mutate(videoId ? `/api/subtitles/${videoId}` : null);
   };
 
   if (!videoId) {
     return (
-      <div className="p-8 text-center text-muted-foreground">
+      <div className="p-8 text-center text-muted-foreground text-lg">
         Enter a YouTube URL above to extract audio and generate subtitles
       </div>
     );
@@ -70,20 +87,20 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   if (error) {
     return (
-      <div className="p-4">
-        <Alert variant="destructive" className="mb-4">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Audio Processing Failed</AlertTitle>
-          <AlertDescription>
+      <div className="p-6">
+        <Alert variant="destructive" className="mb-6">
+          <AlertCircle className="h-5 w-5" />
+          <AlertTitle className="text-lg font-semibold">Audio Processing Failed</AlertTitle>
+          <AlertDescription className="mt-2 text-base">
             We couldn't process the audio because:
-            <ul className="list-disc list-inside mt-2">
+            <ul className="list-disc list-inside mt-3 space-y-1">
               <li>The video might be too long (max 30 minutes)</li>
               <li>The video might be private or unavailable</li>
               <li>There might be an issue with the audio extraction</li>
             </ul>
           </AlertDescription>
         </Alert>
-        <Button onClick={handleRetry} className="w-full">
+        <Button onClick={handleRetry} className="w-full h-11 text-base">
           Try Processing Again
         </Button>
       </div>
@@ -91,29 +108,35 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   }
 
   return (
-    <div className="p-4">
-      <ScrollArea className="h-[400px]">
+    <div className="p-6">
+      <ScrollArea className="h-[500px]">
         {isValidating ? (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Extracting and Processing Audio...
+          <div className="space-y-6">
+            <div className="flex items-center gap-3 text-primary text-lg">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              Processing Audio...
             </div>
-            <Alert>
-              <AlertTitle>Processing Audio</AlertTitle>
-              <AlertDescription>
-                We're currently:
-                <ul className="list-disc list-inside mt-2">
-                  <li>Downloading the audio from YouTube</li>
-                  <li>Converting it to the right format</li>
-                  <li>Generating subtitles using AI</li>
+            <Progress value={progress} className="h-2" />
+            <Alert className="bg-muted">
+              <AlertTitle className="text-lg font-semibold mb-2">Processing Steps</AlertTitle>
+              <AlertDescription className="text-base space-y-4">
+                <ul className="list-disc list-inside space-y-2">
+                  <li className={progress > 30 ? "text-muted-foreground" : ""}>
+                    Downloading the audio from YouTube
+                  </li>
+                  <li className={progress > 60 ? "text-muted-foreground" : ""}>
+                    Converting audio format
+                  </li>
+                  <li>Generating transcription using AI</li>
                 </ul>
-                This might take a few minutes depending on the video length.
+                <p className="text-sm text-muted-foreground mt-4">
+                  This might take a few minutes depending on the video length.
+                </p>
               </AlertDescription>
             </Alert>
           </div>
         ) : subtitles ? (
-          <div className="prose prose-sm max-w-none dark:prose-invert">
+          <div className="prose prose-lg max-w-none dark:prose-invert">
             {subtitles
               .reduce((acc, subtitle) => {
                 const lastParagraph = acc[acc.length - 1] || [];
@@ -126,13 +149,15 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
                 return acc;
               }, [] as string[][])
               .map((paragraph, index) => (
-                <p key={index} className="mb-4">
+                <p key={index} className="mb-6 leading-relaxed">
                   {paragraph.join(' ')}
                 </p>
               ))}
           </div>
         ) : (
-          <div className="text-center text-muted-foreground">No content available</div>
+          <div className="text-center text-muted-foreground text-lg">
+            No content available
+          </div>
         )}
       </ScrollArea>
     </div>
