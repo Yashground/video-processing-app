@@ -10,6 +10,7 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { OpenAI } from "openai";
 import { VideoCache } from "./lib/cache";
+import { AppError, handleError, withErrorHandler, retryOperation } from "./lib/error";
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -27,10 +28,15 @@ mkdir(tempDir, { recursive: true }).catch(err => {
 
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 
+// Input validation schemas
+const videoIdSchema = z.string().min(1).max(20);
+const textSchema = z.string().min(1).max(10000);
+const languageSchema = z.string().min(2).max(5);
+
 async function getVideoMetadata(videoId: string) {
-  try {
+  return retryOperation(async () => {
     if (!process.env.YOUTUBE_API_KEY) {
-      throw new Error('YouTube API key is not configured');
+      throw new AppError(500, 'YouTube API key is not configured');
     }
 
     const response = await fetch(
@@ -38,13 +44,13 @@ async function getVideoMetadata(videoId: string) {
     );
 
     if (!response.ok) {
-      throw new Error(`YouTube API error: ${response.statusText}`);
+      throw new AppError(response.status, `YouTube API error: ${response.statusText}`);
     }
 
     const data = await response.json();
     
     if (!data.items?.[0]) {
-      throw new Error('Video not found');
+      throw new AppError(404, 'Video not found');
     }
 
     const snippet = data.items[0].snippet;
@@ -52,32 +58,27 @@ async function getVideoMetadata(videoId: string) {
       title: snippet.title || 'Untitled Video',
       thumbnailUrl: snippet.thumbnails?.medium?.url || snippet.thumbnails?.default?.url || null
     };
-  } catch (error) {
-    console.error('Error fetching video metadata:', error);
-    return {
-      title: 'Untitled Video',
-      thumbnailUrl: null
-    };
-  }
+  });
 }
 
 export function registerRoutes(app: Express) {
-  app.get("/api/videos", async (req, res) => {
-    try {
-      const videos = await db
-        .select({
-          videoId: subtitles.videoId,
-          title: subtitles.title,
-          thumbnailUrl: subtitles.thumbnailUrl,
-          createdAt: subtitles.createdAt
-        })
-        .from(subtitles)
-        .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt)
-        .orderBy(desc(subtitles.createdAt));
+  // Get all videos
+  app.get("/api/videos", withErrorHandler(async (req, res) => {
+    const videos = await db
+      .select({
+        videoId: subtitles.videoId,
+        title: subtitles.title,
+        thumbnailUrl: subtitles.thumbnailUrl,
+        createdAt: subtitles.createdAt
+      })
+      .from(subtitles)
+      .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt)
+      .orderBy(desc(subtitles.createdAt));
 
-      const updatedVideos = await Promise.all(
-        videos.map(async (video) => {
-          if (!video.title) {
+    const updatedVideos = await Promise.all(
+      videos.map(async (video) => {
+        if (!video.title) {
+          try {
             const metadata = await getVideoMetadata(video.videoId);
             if (metadata.title !== 'Untitled Video') {
               await db
@@ -89,119 +90,95 @@ export function registerRoutes(app: Express) {
                 .where(eq(subtitles.videoId, video.videoId));
               return { ...video, ...metadata };
             }
+          } catch (error) {
+            console.error(`Error updating metadata for video ${video.videoId}:`, error);
           }
-          return video;
-        })
-      );
-
-      res.json(updatedVideos);
-    } catch (error) {
-      console.error("Error fetching videos:", error);
-      res.status(500).json({ error: "Failed to fetch video history" });
-    }
-  });
-
-  app.get("/api/videos/export", async (req, res) => {
-    try {
-      const allVideos = await db
-        .select()
-        .from(subtitles)
-        .orderBy(desc(subtitles.createdAt));
-
-      // Group subtitles by video
-      const videoMap = allVideos.reduce((acc, subtitle) => {
-        if (!acc[subtitle.videoId]) {
-          acc[subtitle.videoId] = {
-            videoId: subtitle.videoId,
-            title: subtitle.title,
-            createdAt: subtitle.createdAt,
-            language: subtitle.language,
-            subtitles: []
-          };
         }
-        acc[subtitle.videoId].subtitles.push({
-          start: subtitle.start,
-          end: subtitle.end,
-          text: subtitle.text
-        });
-        return acc;
-      }, {} as Record<string, any>);
+        return video;
+      })
+    );
 
-      const exportData = {
-        exportDate: new Date().toISOString(),
-        videos: Object.values(videoMap)
-      };
+    res.json(updatedVideos);
+  }));
 
-      // Set headers for file download
-      res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Disposition', 'attachment; filename=video-history-export.json');
-      
-      res.json(exportData);
-    } catch (error) {
-      console.error("Error exporting history:", error);
-      res.status(500).json({ error: "Failed to export history" });
-    }
-  });
+  // Export videos
+  app.get("/api/videos/export", withErrorHandler(async (req, res) => {
+    const allVideos = await db
+      .select()
+      .from(subtitles)
+      .orderBy(desc(subtitles.createdAt));
 
-  app.delete("/api/videos", async (req, res) => {
-    try {
-      await db.delete(subtitles);
-      res.json({ message: "History cleared successfully" });
-    } catch (error) {
-      console.error("Error clearing history:", error);
-      res.status(500).json({ error: "Failed to clear history" });
-    }
-  });
-
-  app.get("/api/cache/stats", (req, res) => {
-    try {
-      const cache = VideoCache.getInstance();
-      const stats = cache.getCacheStats();
-      res.json({
-        ...stats,
-        totalSizeMB: Math.round(stats.totalSize / (1024 * 1024) * 100) / 100
+    const videoMap = allVideos.reduce((acc, subtitle) => {
+      if (!acc[subtitle.videoId]) {
+        acc[subtitle.videoId] = {
+          videoId: subtitle.videoId,
+          title: subtitle.title,
+          createdAt: subtitle.createdAt,
+          language: subtitle.language,
+          subtitles: []
+        };
+      }
+      acc[subtitle.videoId].subtitles.push({
+        start: subtitle.start,
+        end: subtitle.end,
+        text: subtitle.text
       });
-    } catch (error) {
-      console.error("Error getting cache stats:", error);
-      res.status(500).json({ error: "Failed to get cache statistics" });
-    }
-  });
+      return acc;
+    }, {} as Record<string, any>);
 
-  app.delete("/api/cache/:videoId", async (req, res) => {
-    try {
-      const videoId = req.params.videoId;
-      const cache = VideoCache.getInstance();
-      await cache.invalidateCache(videoId);
-      res.json({ message: "Cache entry deleted successfully" });
-    } catch (error) {
-      console.error("Error clearing cache entry:", error);
-      res.status(500).json({ error: "Failed to clear cache entry" });
-    }
-  });
+    const exportData = {
+      exportDate: new Date().toISOString(),
+      videos: Object.values(videoMap)
+    };
 
-  app.delete("/api/videos/:videoId", async (req, res) => {
-    try {
-      const videoId = req.params.videoId;
-      const cache = VideoCache.getInstance();
-      // Also clear the cache when deleting a video
-      await Promise.all([
-        db.delete(subtitles).where(eq(subtitles.videoId, videoId)),
-        cache.invalidateCache(videoId)
-      ]);
-      res.json({ message: "Video deleted successfully" });
-    } catch (error) {
-      console.error("Error deleting video:", error);
-      res.status(500).json({ error: "Failed to delete video" });
-    }
-  });
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename=video-history-export.json');
+    res.json(exportData);
+  }));
 
-  app.post("/api/summarize", async (req, res) => {
-    try {
-      const { text } = z.object({
-        text: z.string().min(1)
-      }).parse(req.body);
+  // Clear all videos
+  app.delete("/api/videos", withErrorHandler(async (req, res) => {
+    await db.delete(subtitles);
+    res.json({ message: "History cleared successfully" });
+  }));
 
-      const summary = await openai.chat.completions.create({
+  // Get cache stats
+  app.get("/api/cache/stats", withErrorHandler((req, res) => {
+    const cache = VideoCache.getInstance();
+    const stats = cache.getCacheStats();
+    res.json({
+      ...stats,
+      totalSizeMB: Math.round(stats.totalSize / (1024 * 1024) * 100) / 100
+    });
+  }));
+
+  // Delete cache entry
+  app.delete("/api/cache/:videoId", withErrorHandler(async (req, res) => {
+    const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
+    const cache = VideoCache.getInstance();
+    await cache.invalidateCache(videoId);
+    res.json({ message: "Cache entry deleted successfully" });
+  }));
+
+  // Delete video
+  app.delete("/api/videos/:videoId", withErrorHandler(async (req, res) => {
+    const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
+    const cache = VideoCache.getInstance();
+    
+    await Promise.all([
+      db.delete(subtitles).where(eq(subtitles.videoId, videoId)),
+      cache.invalidateCache(videoId)
+    ]);
+    
+    res.json({ message: "Video deleted successfully" });
+  }));
+
+  // Generate summary
+  app.post("/api/summarize", withErrorHandler(async (req, res) => {
+    const { text } = await z.object({ text: textSchema }).parseAsync(req.body);
+
+    const summary = await retryOperation(async () => {
+      const completion = await openai.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: [
           {
@@ -217,27 +194,29 @@ export function registerRoutes(app: Express) {
         max_tokens: 500
       });
 
-      res.json({ summary: summary.choices[0]?.message?.content || "No summary generated" });
-    } catch (error) {
-      console.error("Error generating summary:", error);
-      res.status(500).json({ error: "Failed to generate summary" });
-    }
-  });
+      const summaryText = completion.choices[0]?.message?.content;
+      if (!summaryText) throw new AppError(500, "No summary generated");
+      return summaryText;
+    });
 
-  app.get("/api/subtitles/:videoId", async (req, res) => {
-    const videoId = req.params.videoId;
+    res.json({ summary });
+  }));
+
+  // Get subtitles
+  app.get("/api/subtitles/:videoId", withErrorHandler(async (req, res) => {
+    const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
     let audioPath: string | null = null;
     
-    try {
-      // First check if subtitles exist in database
-      const existingSubtitles = await db.select()
-        .from(subtitles)
-        .where(eq(subtitles.videoId, videoId))
-        .orderBy(subtitles.start);
+    // First check if subtitles exist in database
+    const existingSubtitles = await db.select()
+      .from(subtitles)
+      .where(eq(subtitles.videoId, videoId))
+      .orderBy(subtitles.start);
 
-      if (existingSubtitles.length > 0) {
-        // Check if metadata exists and update if missing
-        if (!existingSubtitles[0].title) {
+    if (existingSubtitles.length > 0) {
+      // Update metadata if missing
+      if (!existingSubtitles[0].title) {
+        try {
           const metadata = await getVideoMetadata(videoId);
           await db
             .update(subtitles)
@@ -250,47 +229,45 @@ export function registerRoutes(app: Express) {
             subtitle.title = metadata.title;
             subtitle.thumbnailUrl = metadata.thumbnailUrl;
           });
+        } catch (error) {
+          console.error(`Error updating metadata for video ${videoId}:`, error);
         }
-        return res.json(existingSubtitles);
       }
+      return res.json(existingSubtitles);
+    }
 
+    try {
       // Get video metadata before processing
       const metadata = await getVideoMetadata(videoId);
 
       // Process audio and generate subtitles
-      try {
-        audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
-        const subtitleData = await transcribeAudio(audioPath);
-        
-        const subtitlesWithMetadata = subtitleData.map(sub => ({
-          ...sub,
-          videoId,
-          title: metadata.title,
-          thumbnailUrl: metadata.thumbnailUrl
-        }));
+      audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
+      const subtitleData = await transcribeAudio(audioPath);
+      
+      const subtitlesWithMetadata = subtitleData.map(sub => ({
+        ...sub,
+        videoId,
+        title: metadata.title,
+        thumbnailUrl: metadata.thumbnailUrl
+      }));
 
-        await db.insert(subtitles).values(subtitlesWithMetadata);
-        res.json(subtitlesWithMetadata);
-      } catch (error: any) {
-        if (audioPath) {
-          await unlink(audioPath).catch(() => {});
-        }
-        console.error("Subtitle generation error:", error);
-        res.status(500).json({ error: error.message || "Failed to generate subtitles" });
+      await db.insert(subtitles).values(subtitlesWithMetadata);
+      res.json(subtitlesWithMetadata);
+    } finally {
+      if (audioPath) {
+        await unlink(audioPath).catch(console.error);
       }
-    } catch (error) {
-      console.error("Error fetching subtitles:", error);
-      res.status(500).json({ error: "Failed to fetch subtitles" });
     }
-  });
+  }));
 
-  app.post("/api/translate", async (req, res) => {
-    try {
-      const { text, targetLanguage } = z.object({
-        text: z.string().min(1),
-        targetLanguage: z.string().min(2).max(5)
-      }).parse(req.body);
+  // Translate text
+  app.post("/api/translate", withErrorHandler(async (req, res) => {
+    const { text, targetLanguage } = await z.object({
+      text: textSchema,
+      targetLanguage: languageSchema
+    }).parseAsync(req.body);
 
+    const translatedText = await retryOperation(async () => {
       const translation = await openai.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: [
@@ -307,18 +284,11 @@ export function registerRoutes(app: Express) {
         max_tokens: 1000
       });
 
-      const translatedText = translation.choices[0]?.message?.content;
-      
-      if (!translatedText) {
-        throw new Error("No translation generated");
-      }
+      const result = translation.choices[0]?.message?.content;
+      if (!result) throw new AppError(500, "No translation generated");
+      return result;
+    });
 
-      res.json({ translatedText });
-    } catch (error) {
-      console.error("Translation error:", error);
-      res.status(500).json({ 
-        error: error instanceof Error ? error.message : "Translation failed" 
-      });
-    }
-  });
+    res.json({ translatedText });
+  }));
 }

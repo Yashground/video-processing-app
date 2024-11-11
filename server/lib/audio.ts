@@ -9,12 +9,13 @@ import { PassThrough, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { VideoCache } from './cache';
 import { TranscriptionResult } from './types';
+import { AppError, retryOperation } from './error';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Optimized chunk sizes and processing configurations
+// Configuration constants
 const MAX_CHUNK_SIZE = 25 * 1024 * 1024; // 25MB for optimal OpenAI API performance
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 const MAX_RETRIES = 3;
@@ -44,24 +45,6 @@ function getChunkConfig(duration: number) {
     return CHUNK_SIZE_CONFIG.LONG;
   } else {
     return CHUNK_SIZE_CONFIG.EXTENDED;
-  }
-}
-
-// Utility function for exponential backoff
-async function withRetry<T>(
-  operation: () => Promise<T>,
-  retries = MAX_RETRIES,
-  delay = RETRY_DELAY
-): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (retries > 0) {
-      console.log(`Retrying operation, ${retries} attempts remaining...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      return withRetry(operation, retries - 1, delay * 2);
-    }
-    throw error;
   }
 }
 
@@ -99,12 +82,11 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   console.log(`[1/2] Starting download for video ${videoId}`);
   
   try {
-    // Download with direct file output
-    await withRetry(async () => {
+    await retryOperation(async () => {
       await youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
         extractAudio: true,
         audioFormat: 'mp3',
-        audioQuality: 0, // Best quality
+        audioQuality: 0,
         output: audioPath,
         maxFilesize: '100M',
         matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
@@ -114,18 +96,17 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
           'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
         ]
       });
-    });
+    }, 3, 2000);
 
     console.log('[2/2] Download complete, verifying file');
 
-    // Verify the output file
     const stats = await stat(audioPath);
     if (stats.size === 0) {
-      throw new Error('Downloaded audio file is empty - the video might be unavailable or private');
+      throw new AppError(400, 'Downloaded audio file is empty - the video might be unavailable or private');
     }
 
-    if (stats.size < 1024) { // Less than 1KB
-      throw new Error('Downloaded audio file is too small - the video might be corrupted or restricted');
+    if (stats.size < 1024) {
+      throw new AppError(400, 'Downloaded audio file is too small - the video might be corrupted or restricted');
     }
 
     console.log(`Audio download complete (${stats.size} bytes)`);
@@ -133,24 +114,22 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   } catch (error) {
     await cleanupFile(audioPath);
     
-    // Enhance error message based on the error type
+    if (error instanceof AppError) throw error;
+    
     let errorMessage = 'Failed to download audio: ';
     if (error instanceof Error) {
       if (error.message.includes('Video unavailable')) {
-        errorMessage += 'The video is unavailable or private';
+        throw new AppError(404, 'The video is unavailable or private');
       } else if (error.message.includes('maxFilesize')) {
-        errorMessage += 'The video file is too large (max 100MB)';
+        throw new AppError(400, 'The video file is too large (max 100MB)');
       } else if (error.message.includes('duration')) {
-        errorMessage += 'The video is too long (max 2 hours)';
+        throw new AppError(400, 'The video is too long (max 2 hours)');
       } else {
-        errorMessage += error.message;
+        throw new AppError(500, error.message);
       }
-    } else {
-      errorMessage += 'Unknown error occurred';
     }
     
-    console.error('Error in audio download:', errorMessage);
-    throw new Error(errorMessage);
+    throw new AppError(500, 'Unknown error occurred during download');
   }
 }
 
@@ -163,7 +142,7 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
     ffmpeg.ffprobe(audioPath, async (err, metadata) => {
       if (err) {
         console.error('Error probing audio file:', err);
-        return reject(err);
+        return reject(new AppError(500, 'Failed to analyze audio file'));
       }
       
       const duration = metadata.format.duration || 0;
@@ -179,26 +158,25 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
           
           await cleanupFile(segmentPath);
           
-          await new Promise<void>((res, rej) => {
-            ffmpeg(audioPath)
-              .setStartTime(startTime)
-              .setDuration(Math.min(chunkConfig.duration, duration - startTime))
-              .audioFrequency(16000)
-              .audioChannels(1)
-              .audioBitrate('128k')
-              .outputOptions(['-acodec', 'libmp3lame'])
-              .output(segmentPath)
-              .on('end', () => res())
-              .on('error', (err) => {
-                console.error('Error creating segment:', err);
-                rej(err);
-              })
-              .run();
+          await retryOperation(async () => {
+            await new Promise<void>((res, rej) => {
+              ffmpeg(audioPath)
+                .setStartTime(startTime)
+                .setDuration(Math.min(chunkConfig.duration, duration - startTime))
+                .audioFrequency(16000)
+                .audioChannels(1)
+                .audioBitrate('128k')
+                .outputOptions(['-acodec', 'libmp3lame'])
+                .output(segmentPath)
+                .on('end', () => res())
+                .on('error', (err) => rej(new AppError(500, `Failed to process audio segment: ${err.message}`)))
+                .run();
+            });
           });
           
           const stats = await stat(segmentPath);
           if (stats.size === 0) {
-            throw new Error(`Generated segment file is empty: ${segmentPath}`);
+            throw new AppError(500, `Generated segment file is empty: ${segmentPath}`);
           }
           
           return { path: segmentPath, startTime: startTime * 1000 };
@@ -216,7 +194,7 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       } catch (error) {
         console.error('Error splitting audio:', error);
         await Promise.all(segments.map(segment => cleanupFile(segment.path)));
-        reject(error);
+        reject(error instanceof AppError ? error : new AppError(500, 'Failed to split audio file'));
       }
     });
   });
@@ -227,7 +205,6 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
   const cache = VideoCache.getInstance();
   
   try {
-    // Check cache first
     const cachedResults = await cache.getCached(videoId);
     if (cachedResults) {
       console.log('Using cached transcription results');
@@ -244,18 +221,17 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
       const segments = await splitAudio(audioPath);
       const chunkConfig = await new Promise<{ parallel: number }>((resolve, reject) => {
         ffmpeg.ffprobe(audioPath, (err, metadata) => {
-          if (err) reject(err);
+          if (err) reject(new AppError(500, 'Failed to analyze audio file'));
           const duration = metadata.format.duration || 0;
           resolve(getChunkConfig(duration));
         });
       });
       
-      // Process segments in parallel with dynamic limit
       for (let i = 0; i < segments.length; i += chunkConfig.parallel) {
         const batch = segments.slice(i, i + chunkConfig.parallel);
         const batchResults = await Promise.all(batch.map(async segment => {
           try {
-            const transcription = await withRetry(async () => {
+            const transcription = await retryOperation(async () => {
               return await openai.audio.transcriptions.create({
                 file: createReadStream(segment.path),
                 model: "whisper-1",
@@ -283,7 +259,7 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
         allSubtitles = [...allSubtitles, ...batchResults.flat()];
       }
     } else {
-      const transcription = await withRetry(async () => {
+      const transcription = await retryOperation(async () => {
         return await openai.audio.transcriptions.create({
           file: createReadStream(audioPath),
           model: "whisper-1",
@@ -295,7 +271,7 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
       console.log(`Detected language: ${transcriptionLanguage}`);
       
       if (!transcription.segments || transcription.segments.length === 0) {
-        throw new Error('No transcription segments found');
+        throw new AppError(500, 'No transcription segments found');
       }
       
       allSubtitles = transcription.segments.map(segment => ({
@@ -309,16 +285,15 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
     await cleanupFile(audioPath);
     
     if (allSubtitles.length === 0) {
-      throw new Error('No transcription segments generated');
+      throw new AppError(500, 'No transcription segments generated');
     }
 
-    // Cache the results
     await cache.setCached(videoId, allSubtitles);
     
     return allSubtitles;
   } catch (error) {
     console.error('Transcription error:', error);
     await cleanupFile(audioPath);
-    throw error;
+    throw error instanceof AppError ? error : new AppError(500, 'Failed to transcribe audio');
   }
 }
