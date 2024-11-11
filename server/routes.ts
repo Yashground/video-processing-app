@@ -4,7 +4,7 @@ import { db } from "../db";
 import { subtitles } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
-import { mkdir } from "fs/promises";
+import { mkdir, unlink } from "fs/promises";
 import { join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
@@ -13,15 +13,19 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Ensure temp directory exists
-mkdir(join(process.cwd(), 'temp')).catch(() => {});
+const tempDir = join(process.cwd(), 'temp');
+mkdir(tempDir, { recursive: true }).catch(err => {
+  console.error('Error creating temp directory:', err);
+});
 
 const MAX_VIDEO_DURATION = 1800; // 30 minutes in seconds
 
 export function registerRoutes(app: Express) {
   app.get("/api/subtitles/:videoId", async (req, res) => {
+    const videoId = req.params.videoId;
+    let audioPath: string | null = null;
+    
     try {
-      const videoId = req.params.videoId;
-      
       // First check if subtitles exist in database
       const existingSubtitles = await db.select()
         .from(subtitles)
@@ -35,7 +39,7 @@ export function registerRoutes(app: Express) {
       // If not in database, process audio and generate subtitles
       try {
         // Download audio with max duration limit
-        const audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
+        audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
         
         // Generate transcription using Whisper
         const subtitleData = await transcribeAudio(audioPath);
@@ -54,14 +58,29 @@ export function registerRoutes(app: Express) {
       } catch (error: any) {
         console.error("Error processing audio:", error);
         
+        // Clean up any incomplete downloads
+        if (audioPath) {
+          await unlink(audioPath).catch(err => {
+            console.error("Error cleaning up audio file:", err);
+          });
+        }
+        
         // Handle specific error cases
-        if (error.message?.includes("Maximum content size")) {
+        if (error.message?.includes("too large") || error.message?.includes("maxFilesize")) {
+          res.status(413).json({ 
+            error: "Video file is too large. Please try a shorter video." 
+          });
+        } else if (error.message?.includes("duration") || error.message?.includes("maximum limit")) {
           res.status(413).json({ 
             error: "Video is too long. Please try a shorter video (max 30 minutes)." 
           });
-        } else if (error.message?.includes("no suitable")) {
+        } else if (error.message?.includes("unavailable") || error.message?.includes("private")) {
           res.status(400).json({ 
-            error: "Could not download audio from this video. Please try another video." 
+            error: "Video is unavailable or private. Please try another video." 
+          });
+        } else if (error.code === 'ENOENT') {
+          res.status(500).json({ 
+            error: "Failed to process audio file. Please try again." 
           });
         } else {
           res.status(500).json({ 
