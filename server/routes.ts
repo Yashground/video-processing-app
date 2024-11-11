@@ -30,7 +30,7 @@ const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 
 // Input validation schemas
 const videoIdSchema = z.string().min(1).max(20);
-const textSchema = z.string().min(1).max(10000);
+const textSchema = z.string().min(1).max(25000);
 const languageSchema = z.string().min(2).max(5);
 
 async function getVideoMetadata(videoId: string) {
@@ -175,29 +175,52 @@ export function registerRoutes(app: Express) {
 
   // Generate summary
   app.post("/api/summarize", withErrorHandler(async (req, res) => {
-    const { text } = await z.object({ text: textSchema }).parseAsync(req.body);
+    const { text } = await z.object({ text: textSchema }).parseAsync(req.body).catch(error => {
+      if (error.issues?.[0]?.code === 'too_big') {
+        throw new AppError(400, 'Text is too long for summarization. Maximum length is 25,000 characters.');
+      }
+      throw error;
+    });
 
     const summary = await retryOperation(async () => {
-      const completion = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages: [
-          {
-            role: "system",
-            content: "You are a helpful assistant that creates concise and informative summaries of text."
-          },
-          {
-            role: "user",
-            content: `Please provide a concise summary of the following text:\n\n${text}`
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 500
-      });
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: [
+            {
+              role: "system",
+              content: "You are a helpful assistant that creates detailed and informative summaries. Include key points, main ideas, and important details while maintaining clarity and coherence. Structure the summary with sections if appropriate."
+            },
+            {
+              role: "user",
+              content: `Please provide a concise summary of the following text:\n\n${text}`
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 1000
+        });
 
-      const summaryText = completion.choices[0]?.message?.content;
-      if (!summaryText) throw new AppError(500, "No summary generated");
-      return summaryText;
-    });
+        const summaryText = completion.choices[0]?.message?.content;
+        if (!summaryText) throw new AppError(500, "No summary generated");
+        return summaryText;
+      } catch (error: any) {
+        console.error('Summary generation error:', error);
+        
+        if (error.response?.status === 429) {
+          throw new AppError(429, "Rate limit exceeded. Please try again later.");
+        }
+        
+        if (error.response?.status === 400 && error.response?.data?.error?.includes('maximum context length')) {
+          throw new AppError(400, "Text is too long for the current model. Please try with a shorter text.");
+        }
+
+        if (error.response?.status === 401) {
+          throw new AppError(401, "API key error. Please contact support.");
+        }
+
+        throw new AppError(500, "Failed to generate summary. Please try again.");
+      }
+    }, 3, 2000);
 
     res.json({ summary });
   }));
