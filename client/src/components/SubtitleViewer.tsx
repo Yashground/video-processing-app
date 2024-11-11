@@ -15,10 +15,10 @@ interface Subtitle {
 
 interface SubtitleViewerProps {
   videoId: string | null;
+  onTextUpdate?: (text: string) => void;
 }
 
-export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
-  const [selectedSubtitle, setSelectedSubtitle] = useState<Subtitle | null>(null);
+export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const { toast } = useToast();
   
@@ -44,6 +44,16 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
       shouldRetryOnError: false
     }
   );
+
+  useEffect(() => {
+    if (subtitles && onTextUpdate) {
+      const fullText = subtitles
+        .map(sub => sub.text.trim())
+        .join(' ')
+        .replace(/\s+/g, ' ');
+      onTextUpdate(fullText);
+    }
+  }, [subtitles, onTextUpdate]);
 
   const handleRetry = () => {
     setRetryCount(count => count + 1);
@@ -83,45 +93,47 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
   return (
     <div className="p-4">
       <ScrollArea className="h-[400px]">
-        <div className="space-y-2">
-          {isValidating ? (
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Extracting and Processing Audio...
-              </div>
-              <Alert>
-                <AlertTitle>Processing Audio</AlertTitle>
-                <AlertDescription>
-                  We're currently:
-                  <ul className="list-disc list-inside mt-2">
-                    <li>Downloading the audio from YouTube</li>
-                    <li>Converting it to the right format</li>
-                    <li>Generating subtitles using AI</li>
-                  </ul>
-                  This might take a few minutes depending on the video length.
-                </AlertDescription>
-              </Alert>
+        {isValidating ? (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Extracting and Processing Audio...
             </div>
-          ) : subtitles ? (
-            subtitles.map((subtitle, index) => (
-              <div
-                key={index}
-                className={`p-2 rounded cursor-pointer hover:bg-secondary ${
-                  selectedSubtitle === subtitle ? "bg-secondary" : ""
-                }`}
-                onClick={() => setSelectedSubtitle(subtitle)}
-              >
-                <p className="text-sm text-muted-foreground">
-                  {new Date(subtitle.start).toISOString().substr(11, 8)}
+            <Alert>
+              <AlertTitle>Processing Audio</AlertTitle>
+              <AlertDescription>
+                We're currently:
+                <ul className="list-disc list-inside mt-2">
+                  <li>Downloading the audio from YouTube</li>
+                  <li>Converting it to the right format</li>
+                  <li>Generating subtitles using AI</li>
+                </ul>
+                This might take a few minutes depending on the video length.
+              </AlertDescription>
+            </Alert>
+          </div>
+        ) : subtitles ? (
+          <div className="prose prose-sm max-w-none dark:prose-invert">
+            {subtitles
+              .reduce((acc, subtitle) => {
+                const lastParagraph = acc[acc.length - 1] || [];
+                if (lastParagraph.length < 5) {
+                  lastParagraph.push(subtitle.text);
+                  if (acc.length === 0) acc.push(lastParagraph);
+                } else {
+                  acc.push([subtitle.text]);
+                }
+                return acc;
+              }, [] as string[][])
+              .map((paragraph, index) => (
+                <p key={index} className="mb-4">
+                  {paragraph.join(' ')}
                 </p>
-                <p className="text-foreground">{subtitle.text}</p>
-              </div>
-            ))
-          ) : (
-            <div className="text-center text-muted-foreground">No subtitles available</div>
-          )}
-        </div>
+              ))}
+          </div>
+        ) : (
+          <div className="text-center text-muted-foreground">No content available</div>
+        )}
       </ScrollArea>
     </div>
   );

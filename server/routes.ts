@@ -8,6 +8,12 @@ import { mkdir, unlink } from "fs/promises";
 import { join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { OpenAI } from "openai";
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 // Configure ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -21,6 +27,35 @@ mkdir(tempDir, { recursive: true }).catch(err => {
 const MAX_VIDEO_DURATION = 1800; // 30 minutes in seconds
 
 export function registerRoutes(app: Express) {
+  app.post("/api/summarize", async (req, res) => {
+    try {
+      const { text } = z.object({
+        text: z.string().min(1)
+      }).parse(req.body);
+
+      const summary = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          {
+            role: "system",
+            content: "You are a helpful assistant that creates concise and informative summaries of text."
+          },
+          {
+            role: "user",
+            content: `Please provide a concise summary of the following text:\n\n${text}`
+          }
+        ],
+        temperature: 0.7,
+        max_tokens: 500
+      });
+
+      res.json({ summary: summary.choices[0]?.message?.content || "No summary generated" });
+    } catch (error) {
+      console.error("Error generating summary:", error);
+      res.status(500).json({ error: "Failed to generate summary" });
+    }
+  });
+
   app.get("/api/subtitles/:videoId", async (req, res) => {
     const videoId = req.params.videoId;
     let audioPath: string | null = null;
