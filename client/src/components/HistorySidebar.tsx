@@ -21,6 +21,12 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 interface VideoMetadata {
   videoId: string;
   title: string | null;
+  timeSaved?: number;
+}
+
+interface HistoryResponse {
+  videos: VideoMetadata[];
+  totalTimeSaved: number;
 }
 
 interface HistorySidebarProps {
@@ -30,7 +36,7 @@ interface HistorySidebarProps {
 }
 
 export default function HistorySidebar({ onVideoSelect, selectedVideoId, className }: HistorySidebarProps) {
-  const { data: videos, isLoading } = useSWR<VideoMetadata[]>('/api/videos');
+  const { data, isLoading } = useSWR<HistoryResponse>('/api/videos');
   const { toast } = useToast();
 
   const clearHistory = async () => {
@@ -143,13 +149,13 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
 
   return (
     <div className={cn("w-80 border-r bg-muted/10", className)}>
-      <div className="p-6 border-b">
+      <div className="p-6 border-b space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Clock className="h-6 w-6 text-primary" />
             <h2 className="text-xl font-semibold">History</h2>
           </div>
-          {videos && videos.length > 0 && (
+          {data?.videos && data.videos.length > 0 && (
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
@@ -192,10 +198,18 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
             </div>
           )}
         </div>
+        {data?.totalTimeSaved ? (
+          <div className="flex items-center gap-2 px-3 py-2 bg-primary/10 rounded-md text-primary">
+            <Clock className="h-5 w-5" />
+            <span className="font-medium">
+              {Math.round(data.totalTimeSaved)} minutes saved in total
+            </span>
+          </div>
+        ) : null}
       </div>
-      <ScrollArea className="h-[calc(100vh-5rem)]">
+      <ScrollArea className="h-[calc(100vh-7rem)]">
         <div className="p-4 space-y-3">
-          {videos?.map((video) => (
+          {data?.videos?.map((video) => (
             <Card
               key={video.videoId}
               className={cn(
@@ -211,9 +225,16 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
                 >
                   <div className="flex items-start gap-3">
                     <Video className="h-5 w-5 mt-1 text-primary/60 flex-shrink-0" />
-                    <h3 className="text-lg font-medium leading-snug">
-                      {video.title || `Video ${video.videoId}`}
-                    </h3>
+                    <div className="space-y-1">
+                      <h3 className="text-lg font-medium leading-snug">
+                        {video.title || `Video ${video.videoId}`}
+                      </h3>
+                      {video.timeSaved && (
+                        <p className="text-sm text-muted-foreground">
+                          {Math.round(video.timeSaved)} minutes saved
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <DropdownMenu>
@@ -235,7 +256,7 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
               </div>
             </Card>
           ))}
-          {videos?.length === 0 && (
+          {!data?.videos?.length && (
             <div className="p-8 text-center text-muted-foreground">
               <Video className="h-8 w-8 mx-auto mb-3 text-primary/40" />
               <p>No videos in history</p>

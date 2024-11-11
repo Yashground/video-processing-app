@@ -1,4 +1,4 @@
-import { pgTable, text, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp, real } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -11,6 +11,7 @@ export const subtitles = pgTable("subtitles", {
   language: text("language"),
   title: text("title"),
   thumbnailUrl: text("thumbnail_url"),
+  timeSaved: real("time_saved"),
   createdAt: timestamp("created_at").defaultNow()
 });
 

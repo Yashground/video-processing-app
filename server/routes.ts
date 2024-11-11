@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { z } from "zod";
 import { db } from "../db";
 import { subtitles } from "../db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sum } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
 import { mkdir, unlink } from "fs/promises";
 import { join } from "path";
@@ -27,6 +27,7 @@ mkdir(tempDir, { recursive: true }).catch(err => {
 });
 
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
+const AVG_READING_SPEED = 400; // words per minute
 
 // Input validation schemas
 const videoIdSchema = z.string().min(1).max(20);
@@ -62,18 +63,23 @@ async function getVideoMetadata(videoId: string) {
 }
 
 export function registerRoutes(app: Express) {
-  // Get all videos
+  // Get all videos with total time saved
   app.get("/api/videos", withErrorHandler(async (req, res) => {
     const videos = await db
       .select({
         videoId: subtitles.videoId,
         title: subtitles.title,
         thumbnailUrl: subtitles.thumbnailUrl,
-        createdAt: subtitles.createdAt
+        createdAt: subtitles.createdAt,
+        timeSaved: subtitles.timeSaved
       })
       .from(subtitles)
-      .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt)
+      .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt, subtitles.timeSaved)
       .orderBy(desc(subtitles.createdAt));
+
+    const totalTimeSaved = await db
+      .select({ total: sum(subtitles.timeSaved) })
+      .from(subtitles);
 
     const updatedVideos = await Promise.all(
       videos.map(async (video) => {
@@ -98,7 +104,10 @@ export function registerRoutes(app: Express) {
       })
     );
 
-    res.json(updatedVideos);
+    res.json({
+      videos: updatedVideos,
+      totalTimeSaved: totalTimeSaved[0]?.total || 0
+    });
   }));
 
   // Export videos
@@ -267,11 +276,18 @@ export function registerRoutes(app: Express) {
       audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
       const subtitleData = await transcribeAudio(audioPath);
       
-      const subtitlesWithMetadata = subtitleData.map(sub => ({
+      // Calculate time saved
+      const totalWords = subtitleData.reduce((sum, sub) => sum + sub.text.trim().split(/\s+/).length, 0);
+      const readingTimeMinutes = totalWords / AVG_READING_SPEED;
+      const videoDurationMinutes = subtitleData[subtitleData.length - 1].end / (1000 * 60);
+      const timeSaved = Math.max(0, videoDurationMinutes - readingTimeMinutes);
+      
+      const subtitlesWithMetadata = subtitleData.map((sub, index) => ({
         ...sub,
         videoId,
         title: metadata.title,
-        thumbnailUrl: metadata.thumbnailUrl
+        thumbnailUrl: metadata.thumbnailUrl,
+        timeSaved: index === 0 ? timeSaved : 0 // Store time saved only in the first subtitle record
       }));
 
       await db.insert(subtitles).values(subtitlesWithMetadata);
