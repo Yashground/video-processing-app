@@ -10,12 +10,46 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// Optimized chunk sizes based on testing
+// Optimized chunk sizes and processing configurations
 const MAX_CHUNK_SIZE = 25 * 1024 * 1024; // 25MB for optimal OpenAI API performance
-const CHUNK_DURATION = 600; // 10 minutes in seconds for better parallelization
+const CHUNK_DURATION = 300; // 5 minutes in seconds for faster parallel processing
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
+const PARALLEL_LIMIT = 4; // Increased parallel processing limit
+const CACHE_SIZE = 10; // Number of segments to cache
+
+// Simple in-memory LRU cache for processed segments
+class SegmentCache {
+  private cache: Map<string, TranscriptionResult[]>;
+  private maxSize: number;
+
+  constructor(maxSize: number) {
+    this.cache = new Map();
+    this.maxSize = maxSize;
+  }
+
+  get(key: string): TranscriptionResult[] | undefined {
+    const value = this.cache.get(key);
+    if (value) {
+      // Move to end (most recently used)
+      this.cache.delete(key);
+      this.cache.set(key, value);
+    }
+    return value;
+  }
+
+  set(key: string, value: TranscriptionResult[]): void {
+    if (this.cache.size >= this.maxSize) {
+      // Remove oldest entry
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
+    }
+    this.cache.set(key, value);
+  }
+}
+
+const segmentCache = new SegmentCache(CACHE_SIZE);
 
 interface AudioSegment {
   path: string;
@@ -55,6 +89,24 @@ async function cleanupFile(filePath: string): Promise<void> {
   }
 }
 
+// Compress audio function
+async function compressAudio(inputPath: string): Promise<string> {
+  const outputPath = inputPath.replace('.m4a', '_compressed.m4a');
+  
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .audioQuality(0) // Highest quality compression
+      .audioBitrate('128k') // Reduced bitrate
+      .output(outputPath)
+      .on('end', () => resolve())
+      .on('error', (err) => reject(err))
+      .run();
+  });
+
+  await cleanupFile(inputPath);
+  return outputPath;
+}
+
 export async function downloadAudio(videoId: string, maxLength?: number): Promise<string> {
   const tempDir = join(process.cwd(), 'temp');
   await mkdir(tempDir, { recursive: true });
@@ -62,16 +114,15 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   const audioPath = join(tempDir, `${videoId}.m4a`);
   
   try {
-    // Clean up any existing file
     await cleanupFile(audioPath);
     
-    console.log(`[1/2] Downloading audio for video ${videoId}`);
+    console.log(`[1/3] Downloading audio for video ${videoId}`);
     
     await withRetry(async () => {
       await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
         extractAudio: true,
         audioFormat: 'm4a',
-        audioQuality: 0,
+        audioQuality: 7, // Lower quality (0-9 scale, higher number = lower quality)
         output: audioPath,
         maxFilesize: '100M',
         matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
@@ -82,17 +133,19 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
         ]
       });
 
-      // Verify file exists and is accessible
       const audioStats = await stat(audioPath);
-      console.log(`[2/2] Successfully downloaded audio: ${audioStats.size} bytes`);
+      console.log(`[2/3] Successfully downloaded audio: ${audioStats.size} bytes`);
     });
+
+    // Compress audio before processing
+    console.log(`[3/3] Compressing audio file...`);
+    const compressedPath = await compressAudio(audioPath);
     
-    return audioPath;
+    return compressedPath;
   } catch (error: any) {
     console.error('Error downloading audio:', error);
     await cleanupFile(audioPath);
     
-    // Enhanced error handling with specific messages
     if (error.stderr?.includes('Video unavailable')) {
       throw new Error('Video is unavailable or private');
     } else if (error.stderr?.includes('maxFilesize')) {
@@ -125,7 +178,6 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       const numChunks = Math.ceil(duration / CHUNK_DURATION);
       
       try {
-        // Process chunks in parallel with a limit
         const chunkPromises = Array.from({ length: numChunks }, async (_, i) => {
           const startTime = i * CHUNK_DURATION;
           const segmentPath = join(tempDir, `${basename(audioPath, '.m4a')}_${i}.m4a`);
@@ -136,6 +188,8 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
             ffmpeg(audioPath)
               .setStartTime(startTime)
               .setDuration(Math.min(CHUNK_DURATION, duration - startTime))
+              .audioQuality(0) // Highest quality compression
+              .audioBitrate('128k') // Reduced bitrate
               .output(segmentPath)
               .on('end', () => res())
               .on('error', (err) => {
@@ -149,11 +203,10 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
           return { path: segmentPath, startTime: startTime * 1000 };
         });
 
-        // Process chunks in parallel with a limit of 3 concurrent operations
-        const parallelLimit = 3;
+        // Process chunks in parallel with increased limit
         const results = [];
-        for (let i = 0; i < chunkPromises.length; i += parallelLimit) {
-          const batch = chunkPromises.slice(i, i + parallelLimit);
+        for (let i = 0; i < chunkPromises.length; i += PARALLEL_LIMIT) {
+          const batch = chunkPromises.slice(i, i + PARALLEL_LIMIT);
           const batchResults = await Promise.all(batch);
           results.push(...batchResults);
         }
@@ -161,7 +214,6 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
         resolve(results.sort((a, b) => a.startTime - b.startTime));
       } catch (error) {
         console.error('Error splitting audio:', error);
-        // Clean up any created segments
         await Promise.all(segments.map(segment => cleanupFile(segment.path)));
         reject(error);
       }
@@ -174,16 +226,23 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
     const stats = await stat(audioPath);
     const fileSize = stats.size;
     
+    // Check cache first
+    const cacheKey = `${audioPath}_${fileSize}`;
+    const cachedResults = segmentCache.get(cacheKey);
+    if (cachedResults) {
+      console.log('Using cached transcription results');
+      return cachedResults;
+    }
+
     let transcriptionLanguage: string | undefined;
     let allSubtitles: TranscriptionResult[] = [];
     
     if (fileSize > MAX_CHUNK_SIZE) {
       const segments = await splitAudio(audioPath);
       
-      // Process segments in parallel with a limit
-      const parallelLimit = 2;
-      for (let i = 0; i < segments.length; i += parallelLimit) {
-        const batch = segments.slice(i, i + parallelLimit);
+      // Process segments in parallel with increased limit
+      for (let i = 0; i < segments.length; i += PARALLEL_LIMIT) {
+        const batch = segments.slice(i, i + PARALLEL_LIMIT);
         const batchResults = await Promise.all(batch.map(async segment => {
           try {
             const transcription = await withRetry(async () => {
@@ -237,12 +296,14 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
       }));
     }
     
-    // Clean up original file
     await cleanupFile(audioPath);
     
     if (allSubtitles.length === 0) {
       throw new Error('No transcription segments generated');
     }
+
+    // Cache the results
+    segmentCache.set(cacheKey, allSubtitles);
     
     return allSubtitles;
   } catch (error) {
