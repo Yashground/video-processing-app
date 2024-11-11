@@ -7,6 +7,8 @@ import ffmpeg from 'fluent-ffmpeg';
 import { promisify } from 'util';
 import { PassThrough, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
+import { VideoCache } from './cache';
+import { TranscriptionResult } from './types';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -17,7 +19,6 @@ const MAX_CHUNK_SIZE = 25 * 1024 * 1024; // 25MB for optimal OpenAI API performa
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
-const CACHE_SIZE = 10;
 const BUFFER_SIZE = 1024 * 1024; // 1MB buffer size for streaming
 
 // Smart chunking configuration
@@ -28,50 +29,9 @@ const CHUNK_SIZE_CONFIG = {
   EXTENDED: { duration: 500, parallel: 8 }  // 90+ minutes
 };
 
-// Simple in-memory LRU cache for processed segments
-class SegmentCache {
-  private cache: Map<string, TranscriptionResult[]>;
-  private maxSize: number;
-
-  constructor(maxSize: number) {
-    this.cache = new Map();
-    this.maxSize = maxSize;
-  }
-
-  get(key: string): TranscriptionResult[] | undefined {
-    const value = this.cache.get(key);
-    if (value) {
-      // Move to end (most recently used)
-      this.cache.delete(key);
-      this.cache.set(key, value);
-    }
-    return value;
-  }
-
-  set(key: string, value: TranscriptionResult[]): void {
-    if (this.cache.size >= this.maxSize) {
-      // Remove oldest entry
-      const firstKey = this.cache.keys().next().value;
-      if (firstKey) {
-        this.cache.delete(firstKey);
-      }
-    }
-    this.cache.set(key, value);
-  }
-}
-
-const segmentCache = new SegmentCache(CACHE_SIZE);
-
 interface AudioSegment {
   path: string;
   startTime: number;
-}
-
-interface TranscriptionResult {
-  start: number;
-  end: number;
-  text: string;
-  language?: string;
 }
 
 // Get chunk configuration based on video duration
@@ -263,13 +223,12 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
 }
 
 export async function transcribeAudio(audioPath: string): Promise<TranscriptionResult[]> {
+  const videoId = basename(audioPath, '.mp3');
+  const cache = VideoCache.getInstance();
+  
   try {
-    const stats = await stat(audioPath);
-    const fileSize = stats.size;
-    
     // Check cache first
-    const cacheKey = `${audioPath}_${fileSize}`;
-    const cachedResults = segmentCache.get(cacheKey);
+    const cachedResults = await cache.getCached(videoId);
     if (cachedResults) {
       console.log('Using cached transcription results');
       return cachedResults;
@@ -277,6 +236,9 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
 
     let transcriptionLanguage: string | undefined;
     let allSubtitles: TranscriptionResult[] = [];
+    
+    const stats = await stat(audioPath);
+    const fileSize = stats.size;
     
     if (fileSize > MAX_CHUNK_SIZE) {
       const segments = await splitAudio(audioPath);
@@ -351,7 +313,7 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
     }
 
     // Cache the results
-    segmentCache.set(cacheKey, allSubtitles);
+    await cache.setCached(videoId, allSubtitles);
     
     return allSubtitles;
   } catch (error) {

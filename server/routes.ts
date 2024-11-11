@@ -9,6 +9,7 @@ import { join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { OpenAI } from "openai";
+import { VideoCache } from "./lib/cache";
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -100,7 +101,6 @@ export function registerRoutes(app: Express) {
     }
   });
 
-  // Add new export endpoint
   app.get("/api/videos/export", async (req, res) => {
     try {
       const allVideos = await db
@@ -153,10 +153,41 @@ export function registerRoutes(app: Express) {
     }
   });
 
+  app.get("/api/cache/stats", (req, res) => {
+    try {
+      const cache = VideoCache.getInstance();
+      const stats = cache.getCacheStats();
+      res.json({
+        ...stats,
+        totalSizeMB: Math.round(stats.totalSize / (1024 * 1024) * 100) / 100
+      });
+    } catch (error) {
+      console.error("Error getting cache stats:", error);
+      res.status(500).json({ error: "Failed to get cache statistics" });
+    }
+  });
+
+  app.delete("/api/cache/:videoId", async (req, res) => {
+    try {
+      const videoId = req.params.videoId;
+      const cache = VideoCache.getInstance();
+      await cache.invalidateCache(videoId);
+      res.json({ message: "Cache entry deleted successfully" });
+    } catch (error) {
+      console.error("Error clearing cache entry:", error);
+      res.status(500).json({ error: "Failed to clear cache entry" });
+    }
+  });
+
   app.delete("/api/videos/:videoId", async (req, res) => {
     try {
       const videoId = req.params.videoId;
-      await db.delete(subtitles).where(eq(subtitles.videoId, videoId));
+      const cache = VideoCache.getInstance();
+      // Also clear the cache when deleting a video
+      await Promise.all([
+        db.delete(subtitles).where(eq(subtitles.videoId, videoId)),
+        cache.invalidateCache(videoId)
+      ]);
       res.json({ message: "Video deleted successfully" });
     } catch (error) {
       console.error("Error deleting video:", error);
