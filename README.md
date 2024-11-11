@@ -1,12 +1,12 @@
-# YouTube Language Learning Platform
+# Video Text Extractor & Summarizer
 
 ## Overview
-A language learning platform that leverages YouTube content for subtitle-based study. Process videos to extract subtitles, generate summaries, and track learning progress.
+A powerful tool that extracts text from YouTube videos and generates concise summaries. Perfect for quickly understanding video content through text transcription and AI-powered summarization.
 
 ## Features
 - YouTube video processing and subtitle extraction
 - AI-powered text summarization
-- Multi-language support with translation capabilities
+- Multi-language transcription support
 - History tracking with thumbnail previews
 - Responsive UI with dark mode support
 
@@ -33,8 +33,8 @@ YOUTUBE_API_KEY=your_youtube_api_key
 ## Usage
 1. Enter a YouTube URL (supports youtube.com/watch?v= and youtu.be/ formats)
 2. Wait for audio processing and transcription
-3. View transcribed text and generated summary
-4. Use the translation panel for multi-language support
+3. View transcribed text in an easy-to-read format
+4. Generate and view AI-powered summary
 5. Access video history in the sidebar
 
 ## API Documentation
@@ -101,12 +101,11 @@ Response:
   - OpenAI Whisper API for transcription
   - OpenAI GPT-3.5 for summarization
   - YouTube Data API for video metadata
-  - LibreTranslate for translations
 
 ## License
 MIT License
 
-Copyright (c) 2024 YouTube Language Learning Platform
+Copyright (c) 2024 Video Text Extractor & Summarizer
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

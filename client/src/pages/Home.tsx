@@ -8,7 +8,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Form, FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form";
 import SubtitleViewer from "../components/SubtitleViewer";
 import SummaryPanel from "../components/SummaryPanel";
-import VocabularyPanel from "../components/VocabularyPanel";
 import HistorySidebar from "../components/HistorySidebar";
 import { useToast } from "@/hooks/use-toast";
 import { Youtube } from "lucide-react";
@@ -113,25 +112,17 @@ export default function Home() {
             </Form>
           </Card>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            <div className="space-y-8">
-              <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
-                <SubtitleViewer 
-                  videoId={videoId} 
-                  onTextUpdate={setTranscribedText}
-                />
-              </Card>
+          <div className="space-y-8">
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+              <SubtitleViewer 
+                videoId={videoId} 
+                onTextUpdate={setTranscribedText}
+              />
+            </Card>
 
-              <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
-                <VocabularyPanel videoId={videoId} />
-              </Card>
-            </div>
-
-            <div className="space-y-8">
-              <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
-                <SummaryPanel text={transcribedText} />
-              </Card>
-            </div>
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+              <SummaryPanel text={transcribedText} />
+            </Card>
           </div>
         </div>
       </div>
