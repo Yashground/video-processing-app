@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { db } from "../db";
-import { subtitles } from "../db/schema";
+import { subtitles, vocabulary } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
 import { mkdir, unlink } from "fs/promises";
@@ -102,7 +102,6 @@ export function registerRoutes(app: Express) {
     }
   });
 
-  // ... rest of the routes remain unchanged ...
   app.post("/api/summarize", async (req, res) => {
     try {
       const { text } = z.object({
@@ -183,8 +182,11 @@ export function registerRoutes(app: Express) {
         await db.insert(subtitles).values(subtitlesWithMetadata);
         res.json(subtitlesWithMetadata);
       } catch (error: any) {
-        // ... error handling remains the same ...
-        throw error;
+        if (audioPath) {
+          await unlink(audioPath).catch(() => {});
+        }
+        console.error("Subtitle generation error:", error);
+        res.status(500).json({ error: error.message || "Failed to generate subtitles" });
       }
     } catch (error) {
       console.error("Error fetching subtitles:", error);
@@ -208,6 +210,87 @@ export function registerRoutes(app: Express) {
     } catch (error) {
       console.error("Error saving subtitles:", error);
       res.status(500).json({ error: "Failed to save subtitles" });
+    }
+  });
+
+  app.get("/api/vocabulary/:videoId", async (req, res) => {
+    try {
+      const videoId = req.params.videoId;
+      
+      // Check if vocabulary already exists
+      const existingVocab = await db
+        .select()
+        .from(vocabulary)
+        .where(eq(vocabulary.videoId, videoId))
+        .orderBy(vocabulary.timestamp);
+
+      if (existingVocab.length > 0) {
+        return res.json(existingVocab);
+      }
+
+      // Get subtitles to extract vocabulary
+      const subtitleData = await db
+        .select()
+        .from(subtitles)
+        .where(eq(subtitles.videoId, videoId))
+        .orderBy(subtitles.start);
+
+      if (subtitleData.length === 0) {
+        return res.status(404).json({ error: "No subtitles found for this video" });
+      }
+
+      // Extract vocabulary using OpenAI
+      const prompt = `Given these subtitles from a video, identify important vocabulary words. For each word:
+1. Consider the context it appears in
+2. Only include words that would be valuable for language learning
+3. Exclude common words unless they have special significance in context
+
+Subtitles:
+${subtitleData.map(s => s.text).join('\n')}
+
+Return the response as a JSON array with objects containing:
+- word: the vocabulary word
+- context: the sentence or phrase it appears in
+- timestamp: the timestamp in milliseconds when it appears
+
+Format: [{"word": "example", "context": "This is an example sentence", "timestamp": 1000}, ...]`;
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: [
+          {
+            role: "system",
+            content: "You are a language learning assistant that identifies important vocabulary from video subtitles. Return only valid JSON."
+          },
+          {
+            role: "user",
+            content: prompt
+          }
+        ],
+        temperature: 0.7,
+        response_format: { type: "json_object" }
+      });
+
+      const vocabList = JSON.parse(completion.choices[0]?.message?.content || "[]").vocabulary || [];
+      
+      // Store vocabulary in database
+      if (vocabList.length > 0) {
+        const vocabularyData = vocabList.map((vocab: any) => ({
+          videoId,
+          word: vocab.word,
+          context: vocab.context,
+          timestamp: vocab.timestamp,
+          language: subtitleData[0].language
+        }));
+
+        await db.insert(vocabulary).values(vocabularyData);
+        return res.json(vocabularyData);
+      }
+
+      return res.json([]);
+    } catch (error) {
+      console.error("Error extracting vocabulary:", error);
+      res.status(500).json({ error: "Failed to extract vocabulary" });
     }
   });
 }
