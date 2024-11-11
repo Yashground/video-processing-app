@@ -148,8 +148,8 @@ function ConnectionStatus({ connected, retrying, onRetry }: { connected: boolean
 }
 
 function TimeSavingEstimate({ wordCount, duration }: { wordCount: number; duration: number }) {
-  // Average reading speed (words per minute)
-  const AVG_READING_SPEED = 250;
+  // Average reading speed (words per minute) - Updated to 400 for more aggressive time savings
+  const AVG_READING_SPEED = 400;
   
   // Calculate reading time in minutes
   const readingTime = wordCount / AVG_READING_SPEED;
