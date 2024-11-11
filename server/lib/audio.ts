@@ -22,85 +22,53 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   const tempDir = join(process.cwd(), 'temp');
   await mkdir(tempDir, { recursive: true });
   
-  const mpcPath = join(tempDir, `${videoId}.mpc`);
-  const mp3Path = join(tempDir, `${videoId}.mp3`);
+  const audioPath = join(tempDir, `${videoId}.m4a`);
   
   try {
-    // Clean up any existing files
-    await unlink(mpcPath).catch(() => {});
-    await unlink(mp3Path).catch(() => {});
+    // Clean up any existing file
+    await unlink(audioPath).catch(() => {});
     
     let attempts = 3;
     while (attempts > 0) {
       try {
-        console.log(`[1/3] Downloading audio for video ${videoId} (attempt ${4 - attempts}/3)`);
+        console.log(`[1/2] Downloading audio for video ${videoId} (attempt ${4 - attempts}/3)`);
         
         await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
           extractAudio: true,
-          audioFormat: 'mpc',
+          audioFormat: 'm4a',
           audioQuality: 0,
-          output: mpcPath,
+          output: audioPath,
           maxFilesize: '25M',
           matchFilter: maxLength ? `duration <= ${maxLength}` : undefined,
           noWarnings: true,
-          noCallHome: true,
           addHeader: [
             'referer:youtube.com',
             'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
           ]
         });
         
-        // Verify MPC file exists and is accessible
-        const mpcStats = await stat(mpcPath);
-        console.log(`[2/3] Successfully downloaded MPC audio: ${mpcStats.size} bytes`);
-        
-        // Convert MPC to MP3
-        console.log(`[3/3] Converting MPC to MP3...`);
-        await new Promise<void>((resolve, reject) => {
-          ffmpeg(mpcPath)
-            .toFormat('mp3')
-            .audioBitrate('64k')
-            .on('progress', (progress) => {
-              console.log(`Converting: ${Math.floor(progress.percent)}% done`);
-            })
-            .on('end', () => {
-              console.log('Conversion completed successfully');
-              resolve();
-            })
-            .on('error', (err) => {
-              console.error('Conversion error:', err);
-              reject(err);
-            })
-            .save(mp3Path);
-        });
-        
-        // Verify MP3 file exists and is accessible
-        const mp3Stats = await stat(mp3Path);
-        console.log(`Successfully created MP3: ${mp3Stats.size} bytes`);
-        
-        // Clean up MPC file
-        await unlink(mpcPath);
+        // Verify file exists and is accessible
+        const audioStats = await stat(audioPath);
+        console.log(`[2/2] Successfully downloaded audio: ${audioStats.size} bytes`);
         break;
       } catch (error) {
         attempts--;
-        console.error(`Process failed (${attempts} attempts remaining):`, error);
+        console.error(`Download attempt failed (${attempts} attempts remaining):`, error);
         
         // Clean up any failed files
-        await unlink(mpcPath).catch(() => {});
-        await unlink(mp3Path).catch(() => {});
+        await unlink(audioPath).catch(() => {});
         
         if (attempts === 0) throw error;
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
     
-    return mp3Path;
+    return audioPath;
   } catch (error: any) {
-    console.error('Error processing audio:', error);
+    console.error('Error downloading audio:', error);
     
     // Clean up any failed files
-    await unlink(mpcPath).catch(() => {});
-    await unlink(mp3Path).catch(() => {});
+    await unlink(audioPath).catch(() => {});
     
     if (error.stderr?.includes('Video unavailable')) {
       throw new Error('Video is unavailable or private');
@@ -112,11 +80,11 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
       throw new Error('Video is not accessible due to copyright restrictions');
     } else if (error.code === 'ENOENT') {
       throw new Error('Failed to save audio file');
-    } else if (error.message?.includes('ffmpeg')) {
-      throw new Error('Failed to convert audio format');
+    } else if (error.stderr?.includes('format')) {
+      throw new Error('Failed to extract audio in the required format');
     }
     
-    throw new Error('Failed to process video audio');
+    throw new Error('Failed to download video audio');
   }
 }
 
@@ -138,7 +106,7 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       try {
         for (let i = 0; i < numChunks; i++) {
           const startTime = i * CHUNK_DURATION;
-          const segmentPath = join(tempDir, `${basename(audioPath, '.mp3')}_${i}.mp3`);
+          const segmentPath = join(tempDir, `${basename(audioPath, '.m4a')}_${i}.m4a`);
           
           // Clean up any existing segment file
           await unlink(segmentPath).catch(() => {});
@@ -148,8 +116,6 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
               .setStartTime(startTime)
               .setDuration(CHUNK_DURATION)
               .output(segmentPath)
-              .audioCodec('libmp3lame')
-              .audioBitrate('64k')
               .on('end', () => res())
               .on('error', (err) => {
                 console.error('Error creating segment:', err);

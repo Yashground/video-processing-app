@@ -90,6 +90,10 @@ export function registerRoutes(app: Express) {
           res.status(403).json({ 
             error: "Video is not accessible due to copyright restrictions." 
           });
+        } else if (error.message?.includes("format")) {
+          res.status(400).json({ 
+            error: "Failed to extract audio in the required format. Please try another video." 
+          });
         } else if (error.code === 'ENOENT') {
           res.status(500).json({ 
             error: "Failed to process audio file. Please try again." 
