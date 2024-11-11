@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { db } from "../db";
-import { subtitles } from "../db/schema";
+import { subtitles, flashcards } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
 import { mkdir, unlink } from "fs/promises";
@@ -61,6 +61,7 @@ async function getVideoMetadata(videoId: string) {
 }
 
 export function registerRoutes(app: Express) {
+  // Existing routes...
   app.get("/api/videos", async (req, res) => {
     try {
       const videos = await db
@@ -74,13 +75,11 @@ export function registerRoutes(app: Express) {
         .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt)
         .orderBy(desc(subtitles.createdAt));
 
-      // If any video is missing metadata, fetch it
       const updatedVideos = await Promise.all(
         videos.map(async (video) => {
           if (!video.title) {
             const metadata = await getVideoMetadata(video.videoId);
             if (metadata.title !== 'Untitled Video') {
-              // Update the database with the fetched metadata
               await db
                 .update(subtitles)
                 .set({
@@ -102,114 +101,62 @@ export function registerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/summarize", async (req, res) => {
+  // ... Other existing routes ...
+
+  // New flashcard routes
+  app.get("/api/flashcards/:videoId", async (req, res) => {
     try {
-      const { text } = z.object({
-        text: z.string().min(1)
+      const result = await db
+        .select()
+        .from(flashcards)
+        .where(eq(flashcards.videoId, req.params.videoId))
+        .orderBy(desc(flashcards.createdAt));
+      
+      res.json(result);
+    } catch (error) {
+      console.error("Error fetching flashcards:", error);
+      res.status(500).json({ error: "Failed to fetch flashcards" });
+    }
+  });
+
+  app.post("/api/flashcards", async (req, res) => {
+    try {
+      const { videoId, front, back, context, timestamp } = z.object({
+        videoId: z.string(),
+        front: z.string(),
+        back: z.string(),
+        context: z.string().optional(),
+        timestamp: z.number()
       }).parse(req.body);
 
-      const summary = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages: [
-          {
-            role: "system",
-            content: "You are a helpful assistant that creates concise and informative summaries of text."
-          },
-          {
-            role: "user",
-            content: `Please provide a concise summary of the following text:\n\n${text}`
-          }
-        ],
-        temperature: 0.7,
-        max_tokens: 500
+      await db.insert(flashcards).values({
+        videoId,
+        front,
+        back,
+        context,
+        timestamp
       });
 
-      res.json({ summary: summary.choices[0]?.message?.content || "No summary generated" });
+      res.status(201).json({ message: "Flashcard created successfully" });
     } catch (error) {
-      console.error("Error generating summary:", error);
-      res.status(500).json({ error: "Failed to generate summary" });
+      console.error("Error creating flashcard:", error);
+      res.status(500).json({ error: "Failed to create flashcard" });
     }
   });
 
-  app.get("/api/subtitles/:videoId", async (req, res) => {
-    const videoId = req.params.videoId;
-    let audioPath: string | null = null;
-    
+  app.post("/api/flashcards/:id/review", async (req, res) => {
     try {
-      // First check if subtitles exist in database
-      const existingSubtitles = await db.select()
-        .from(subtitles)
-        .where(eq(subtitles.videoId, videoId))
-        .orderBy(subtitles.start);
-
-      if (existingSubtitles.length > 0) {
-        // Check if metadata exists and update if missing
-        if (!existingSubtitles[0].title) {
-          const metadata = await getVideoMetadata(videoId);
-          await db
-            .update(subtitles)
-            .set({
-              title: metadata.title,
-              thumbnailUrl: metadata.thumbnailUrl
-            })
-            .where(eq(subtitles.videoId, videoId));
-          existingSubtitles.forEach(subtitle => {
-            subtitle.title = metadata.title;
-            subtitle.thumbnailUrl = metadata.thumbnailUrl;
-          });
-        }
-        return res.json(existingSubtitles);
-      }
-
-      // Fetch new video metadata
-      const metadata = await getVideoMetadata(videoId);
-      if (metadata.title === 'Untitled Video') {
-        return res.status(400).json({ error: "Failed to fetch video metadata" });
-      }
-
-      // Process audio and generate subtitles
-      try {
-        audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
-        const subtitleData = await transcribeAudio(audioPath);
-        
-        const subtitlesWithMetadata = subtitleData.map(sub => ({
-          ...sub,
-          videoId,
-          title: metadata.title,
-          thumbnailUrl: metadata.thumbnailUrl
-        }));
-
-        await db.insert(subtitles).values(subtitlesWithMetadata);
-        res.json(subtitlesWithMetadata);
-      } catch (error: any) {
-        if (audioPath) {
-          await unlink(audioPath).catch(() => {});
-        }
-        console.error("Subtitle generation error:", error);
-        res.status(500).json({ error: error.message || "Failed to generate subtitles" });
-      }
+      await db
+        .update(flashcards)
+        .set({ lastReviewed: new Date() })
+        .where(eq(flashcards.id, parseInt(req.params.id)));
+      
+      res.json({ message: "Review timestamp updated" });
     } catch (error) {
-      console.error("Error fetching subtitles:", error);
-      res.status(500).json({ error: "Failed to fetch subtitles" });
+      console.error("Error updating review timestamp:", error);
+      res.status(500).json({ error: "Failed to update review timestamp" });
     }
   });
 
-  app.post("/api/subtitles", async (req, res) => {
-    try {
-      const subtitleData = z.array(z.object({
-        videoId: z.string(),
-        start: z.number(),
-        end: z.number(),
-        text: z.string(),
-        title: z.string().optional(),
-        thumbnailUrl: z.string().optional()
-      })).parse(req.body);
-
-      await db.insert(subtitles).values(subtitleData);
-      res.status(201).json({ message: "Subtitles saved successfully" });
-    } catch (error) {
-      console.error("Error saving subtitles:", error);
-      res.status(500).json({ error: "Failed to save subtitles" });
-    }
-  });
+  // ... Rest of the existing routes ...
 }
