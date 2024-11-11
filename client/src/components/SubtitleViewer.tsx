@@ -3,7 +3,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, AlertCircle, Globe, RefreshCw, Wifi, WifiOff } from "lucide-react";
+import { Loader2, AlertCircle, Globe, RefreshCw, Wifi, WifiOff, Clock } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -147,6 +147,32 @@ function ConnectionStatus({ connected, retrying, onRetry }: { connected: boolean
   );
 }
 
+function TimeSavingEstimate({ wordCount, duration }: { wordCount: number; duration: number }) {
+  // Average reading speed (words per minute)
+  const AVG_READING_SPEED = 250;
+  
+  // Calculate reading time in minutes
+  const readingTime = wordCount / AVG_READING_SPEED;
+  
+  // Calculate video duration in minutes
+  const videoDuration = duration / 60;
+  
+  // Calculate time saved in minutes
+  const timeSaved = Math.max(0, videoDuration - readingTime);
+  
+  return (
+    <div className="flex items-center gap-2 text-primary">
+      <Clock className="h-5 w-5" />
+      <span className="font-medium">
+        {timeSaved.toFixed(1)} minutes saved compared to watching
+      </span>
+      <div className="text-sm text-muted-foreground">
+        ({Math.ceil(readingTime)} min read vs {Math.ceil(videoDuration)} min video)
+      </div>
+    </div>
+  );
+}
+
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -156,6 +182,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const [wsError, setWsError] = useState<Error | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [wsRetrying, setWsRetrying] = useState(false);
+  const [wordCount, setWordCount] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimeoutRef = useRef<NodeJS.Timeout>();
   const pingIntervalRef = useRef<NodeJS.Timeout>();
@@ -164,6 +192,17 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
     videoId ? `/api/subtitles/${videoId}` : null,
     {
+      onSuccess: (data) => {
+        if (data && data.length > 0) {
+          // Calculate word count from all subtitles
+          const text = data.map(sub => sub.text.trim()).join(' ');
+          setWordCount(text.split(/\s+/).length);
+          
+          // Get video duration from the last subtitle's end time
+          const lastSubtitle = data[data.length - 1];
+          setVideoDuration(lastSubtitle.end / 1000); // Convert ms to seconds
+        }
+      },
       onError: (err) => {
         let errorMessage = "Failed to process audio.";
         if (err.message?.includes("too large") || err.message?.includes("maxFilesize")) {
@@ -352,7 +391,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   if (!videoId) {
     return (
       <div className="p-8 text-center text-muted-foreground text-lg animate-fade-in">
-        Enter a YouTube URL above to extract audio and generate subtitles
+        <p className="mb-4">✨ Transform YouTube videos into readable text</p>
+        <p className="text-sm text-muted-foreground">
+          Enter a YouTube URL above to extract audio, generate transcriptions, and save time by reading instead of watching
+        </p>
       </div>
     );
   }
@@ -360,20 +402,26 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   return (
     <ErrorBoundary onError={handleError}>
       <div className="p-6 animate-fade-in">
-        <div className="mb-4 flex items-center justify-between">
-          {subtitles?.[0]?.language && (
-            <div className="flex items-center gap-2">
-              <Globe className="h-5 w-5 text-primary" />
-              <Badge variant="secondary" className="bg-gradient-to-r from-primary/10 to-primary/5 text-primary px-3 py-1">
-                {getLanguageName(subtitles[0].language)}
-              </Badge>
-            </div>
+        <div className="mb-4 space-y-4">
+          <div className="flex items-center justify-between">
+            {subtitles?.[0]?.language && (
+              <div className="flex items-center gap-2">
+                <Globe className="h-5 w-5 text-primary" />
+                <Badge variant="secondary" className="bg-gradient-to-r from-primary/10 to-primary/5 text-primary px-3 py-1">
+                  {getLanguageName(subtitles[0].language)}
+                </Badge>
+              </div>
+            )}
+            <ConnectionStatus
+              connected={wsConnected}
+              retrying={wsRetrying}
+              onRetry={handleRetry}
+            />
+          </div>
+          
+          {subtitles && !error && !isValidating && (
+            <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
           )}
-          <ConnectionStatus
-            connected={wsConnected}
-            retrying={wsRetrying}
-            onRetry={handleRetry}
-          />
         </div>
 
         {error || wsError ? (
