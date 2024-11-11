@@ -22,6 +22,7 @@ interface VideoMetadata {
   videoId: string;
   title: string | null;
   timeSaved?: number;
+  createdAt: string;
 }
 
 interface HistoryResponse {
@@ -49,7 +50,6 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
         throw new Error('Failed to clear history');
       }
 
-      // Refresh the videos list
       await mutate('/api/videos');
       
       toast({
@@ -73,23 +73,15 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
         throw new Error('Failed to export history');
       }
 
-      // Get the blob from the response
       const blob = await response.blob();
-      
-      // Create a URL for the blob
       const url = window.URL.createObjectURL(blob);
-      
-      // Create a temporary link element
       const link = document.createElement('a');
       link.href = url;
       link.download = `video-history-export-${new Date().toISOString().split('T')[0]}.json`;
       
-      // Append link to body, click it, and remove it
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
-      // Clean up the URL
       window.URL.revokeObjectURL(url);
       
       toast({
@@ -115,7 +107,6 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
         throw new Error('Failed to delete video');
       }
 
-      // Refresh the videos list
       await mutate('/api/videos');
       
       toast({
@@ -211,7 +202,7 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
         <div className="p-4 space-y-3">
           {data?.videos?.map((video) => (
             <Card
-              key={video.videoId}
+              key={`${video.videoId}-${video.createdAt}`}
               className={cn(
                 "p-4 transition-all duration-200",
                 "hover:bg-primary/5 hover:shadow-sm",

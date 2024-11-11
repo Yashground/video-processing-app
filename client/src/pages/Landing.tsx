@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useUser } from "@/hooks/use-user";
 import { Button } from "@/components/ui/button";
 import { useLocation } from "wouter";
+import { Loader2 } from "lucide-react";
 
 // SVG Components
 const WavePattern = () => (
@@ -27,6 +28,7 @@ export function Landing() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [, setLocation] = useLocation();
 
   useEffect(() => {
@@ -38,19 +40,27 @@ export function Landing() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setIsSubmitting(true);
     
-    const result = await (isLogin ? login : register)({ username, password });
-    if (!result.ok) {
-      setError(result.message);
-    } else {
-      setLocation("/home");
+    try {
+      const result = await (isLogin ? login : register)({ username, password });
+      if (!result.ok) {
+        setError(result.message);
+      } else {
+        setLocation("/home");
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="animate-pulse text-lg font-medium">Loading...</div>
+      <div className="min-h-screen bg-gradient-to-b from-pastel-blue via-pastel-blue/50 to-white flex items-center justify-center">
+        <div className="flex items-center gap-2 text-lg font-medium animate-pulse">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          Loading...
+        </div>
       </div>
     );
   }
@@ -116,8 +126,9 @@ export function Landing() {
                     type="text"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    className="w-full p-2 rounded-md border bg-white/50 backdrop-blur-sm transition-all duration-300 focus:ring-2 focus:ring-primary/50 focus:border-primary"
+                    className="w-full p-2 rounded-md border bg-white/50 backdrop-blur-sm transition-all duration-300 focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
                     required
+                    disabled={isSubmitting}
                   />
                 </div>
                 <div className="space-y-2">
@@ -128,8 +139,9 @@ export function Landing() {
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    className="w-full p-2 rounded-md border bg-white/50 backdrop-blur-sm transition-all duration-300 focus:ring-2 focus:ring-primary/50 focus:border-primary"
+                    className="w-full p-2 rounded-md border bg-white/50 backdrop-blur-sm transition-all duration-300 focus:ring-2 focus:ring-primary/50 focus:border-primary disabled:opacity-50"
                     required
+                    disabled={isSubmitting}
                   />
                 </div>
                 {error && (
@@ -137,16 +149,28 @@ export function Landing() {
                 )}
                 <Button 
                   type="submit" 
-                  className="w-full bg-gradient-to-r from-primary to-pastel-purple hover:opacity-90 transition-all duration-300"
+                  className="w-full bg-gradient-to-r from-primary to-pastel-purple hover:opacity-90 transition-all duration-300 disabled:opacity-50"
+                  disabled={isSubmitting}
                 >
-                  {isLogin ? "Login" : "Register"}
+                  {isSubmitting ? (
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      {isLogin ? "Logging in..." : "Creating account..."}
+                    </div>
+                  ) : (
+                    isLogin ? "Login" : "Register"
+                  )}
                 </Button>
               </form>
               <p className="text-sm text-center">
                 {isLogin ? "Don't have an account?" : "Already have an account?"}{" "}
                 <button
-                  onClick={() => setIsLogin(!isLogin)}
-                  className="text-primary hover:text-primary/80 transition-colors duration-300"
+                  onClick={() => {
+                    setIsLogin(!isLogin);
+                    setError("");
+                  }}
+                  className="text-primary hover:text-primary/80 transition-colors duration-300 disabled:opacity-50"
+                  disabled={isSubmitting}
                 >
                   {isLogin ? "Register" : "Login"}
                 </button>
