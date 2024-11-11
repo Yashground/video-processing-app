@@ -60,7 +60,7 @@ export function Landing() {
   }
 
   return (
-    <div className="relative min-h-screen bg-gradient-to-b from-background to-pastel-mint/20 overflow-hidden">
+    <div className="relative min-h-screen bg-gradient-to-b from-pastel-blue via-pastel-blue/50 to-white overflow-hidden">
       <FloatingShapes />
       <div className="container relative mx-auto px-4 py-16 z-10">
         <div className="flex flex-col items-center gap-8">
