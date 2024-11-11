@@ -22,22 +22,24 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   const tempDir = join(process.cwd(), 'temp');
   await mkdir(tempDir, { recursive: true });
   
-  const outputPath = join(tempDir, `${videoId}.mp3`);
+  const mpcPath = join(tempDir, `${videoId}.mpc`);
+  const mp3Path = join(tempDir, `${videoId}.mp3`);
   
   try {
-    // Clean up any existing file
-    await unlink(outputPath).catch(() => {});
+    // Clean up any existing files
+    await unlink(mpcPath).catch(() => {});
+    await unlink(mp3Path).catch(() => {});
     
     let attempts = 3;
     while (attempts > 0) {
       try {
-        console.log(`Attempting to download audio for video ${videoId} (attempt ${4 - attempts}/3)`);
+        console.log(`[1/3] Downloading audio for video ${videoId} (attempt ${4 - attempts}/3)`);
         
         await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
           extractAudio: true,
-          audioFormat: 'mp3',
+          audioFormat: 'mpc',
           audioQuality: 0,
-          output: outputPath,
+          output: mpcPath,
           maxFilesize: '25M',
           matchFilter: maxLength ? `duration <= ${maxLength}` : undefined,
           noWarnings: true,
@@ -48,24 +50,57 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
           ]
         });
         
-        // Verify file exists and is accessible
-        const fileStats = await stat(outputPath);
-        console.log(`Successfully downloaded audio: ${fileStats.size} bytes`);
+        // Verify MPC file exists and is accessible
+        const mpcStats = await stat(mpcPath);
+        console.log(`[2/3] Successfully downloaded MPC audio: ${mpcStats.size} bytes`);
+        
+        // Convert MPC to MP3
+        console.log(`[3/3] Converting MPC to MP3...`);
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(mpcPath)
+            .toFormat('mp3')
+            .audioBitrate('64k')
+            .on('progress', (progress) => {
+              console.log(`Converting: ${Math.floor(progress.percent)}% done`);
+            })
+            .on('end', () => {
+              console.log('Conversion completed successfully');
+              resolve();
+            })
+            .on('error', (err) => {
+              console.error('Conversion error:', err);
+              reject(err);
+            })
+            .save(mp3Path);
+        });
+        
+        // Verify MP3 file exists and is accessible
+        const mp3Stats = await stat(mp3Path);
+        console.log(`Successfully created MP3: ${mp3Stats.size} bytes`);
+        
+        // Clean up MPC file
+        await unlink(mpcPath);
         break;
       } catch (error) {
         attempts--;
-        console.error(`Download attempt failed (${attempts} attempts remaining):`, error);
+        console.error(`Process failed (${attempts} attempts remaining):`, error);
+        
+        // Clean up any failed files
+        await unlink(mpcPath).catch(() => {});
+        await unlink(mp3Path).catch(() => {});
+        
         if (attempts === 0) throw error;
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
     
-    return outputPath;
+    return mp3Path;
   } catch (error: any) {
-    console.error('Error downloading audio:', error);
+    console.error('Error processing audio:', error);
     
-    // Clean up any partially downloaded files
-    await unlink(outputPath).catch(() => {});
+    // Clean up any failed files
+    await unlink(mpcPath).catch(() => {});
+    await unlink(mp3Path).catch(() => {});
     
     if (error.stderr?.includes('Video unavailable')) {
       throw new Error('Video is unavailable or private');
@@ -77,9 +112,11 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
       throw new Error('Video is not accessible due to copyright restrictions');
     } else if (error.code === 'ENOENT') {
       throw new Error('Failed to save audio file');
+    } else if (error.message?.includes('ffmpeg')) {
+      throw new Error('Failed to convert audio format');
     }
     
-    throw new Error('Failed to download video audio');
+    throw new Error('Failed to process video audio');
   }
 }
 

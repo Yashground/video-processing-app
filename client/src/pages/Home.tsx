@@ -11,7 +11,21 @@ import TranslationPanel from "../components/TranslationPanel";
 import { useToast } from "@/hooks/use-toast";
 
 const urlSchema = z.object({
-  videoUrl: z.string().url().refine((url) => url.includes("youtube.com") || url.includes("youtu.be"))
+  videoUrl: z.string().url().refine((url) => {
+    try {
+      const parsed = new URL(url);
+      // Support both youtube.com and youtu.be URLs
+      if (parsed.hostname === "youtu.be") {
+        return parsed.pathname.length > 1; // Must have video ID after /
+      }
+      if (parsed.hostname === "youtube.com" || parsed.hostname === "www.youtube.com") {
+        return !!parsed.searchParams.get("v"); // Must have video ID parameter
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, "Please enter a valid YouTube URL")
 });
 
 export default function Home() {
@@ -27,16 +41,22 @@ export default function Home() {
   const onSubmit = (data: z.infer<typeof urlSchema>) => {
     try {
       const url = new URL(data.videoUrl);
-      let id = url.searchParams.get("v");
-      if (!id && url.hostname === "youtu.be") {
+      let id: string | null = null;
+
+      if (url.hostname === "youtu.be") {
+        // Handle youtu.be URLs
         id = url.pathname.slice(1);
+      } else {
+        // Handle youtube.com URLs
+        id = url.searchParams.get("v");
       }
+
       if (id) {
         setVideoId(id);
       } else {
         toast({
           title: "Invalid URL",
-          description: "Please enter a valid YouTube video URL",
+          description: "Could not extract video ID from the URL",
           variant: "destructive"
         });
       }
@@ -60,7 +80,10 @@ export default function Home() {
               render={({ field }) => (
                 <FormItem className="flex-1">
                   <FormControl>
-                    <Input placeholder="Enter YouTube URL to extract audio and generate subtitles" {...field} />
+                    <Input 
+                      placeholder="Enter YouTube URL (e.g., youtube.com/watch?v=... or youtu.be/...)" 
+                      {...field} 
+                    />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
