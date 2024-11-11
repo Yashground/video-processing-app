@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
 import { Clock, Loader2, Video, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { MoreHorizontal } from "lucide-react";
 
 interface VideoMetadata {
   videoId: string;
@@ -47,6 +49,32 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
     }
   };
 
+  const deleteVideo = async (videoId: string) => {
+    try {
+      const response = await fetch(`/api/videos/${videoId}`, {
+        method: 'DELETE',
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to delete video');
+      }
+
+      // Refresh the videos list
+      await mutate('/api/videos');
+      
+      toast({
+        title: "Video Deleted",
+        description: "The video has been removed from history.",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to delete video. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
   if (isLoading) {
     return (
       <div className={cn("w-80 border-r bg-muted/10", className)}>
@@ -79,7 +107,7 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
               className="flex items-center gap-2 text-destructive hover:text-destructive"
             >
               <Trash2 className="h-4 w-4" />
-              Clear
+              Clear All
             </Button>
           )}
         </div>
@@ -90,17 +118,39 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
             <Card
               key={video.videoId}
               className={cn(
-                "p-4 cursor-pointer transition-all duration-200",
+                "p-4 transition-all duration-200",
                 "hover:bg-primary/5 hover:shadow-sm",
                 selectedVideoId === video.videoId && "border-2 border-primary bg-primary/10"
               )}
-              onClick={() => onVideoSelect(video.videoId)}
             >
-              <div className="flex items-start gap-3">
-                <Video className="h-5 w-5 mt-1 text-primary/60 flex-shrink-0" />
-                <h3 className="text-lg font-medium leading-snug">
-                  {video.title || `Video ${video.videoId}`}
-                </h3>
+              <div className="flex items-start justify-between gap-3">
+                <div 
+                  className="flex-1 cursor-pointer" 
+                  onClick={() => onVideoSelect(video.videoId)}
+                >
+                  <div className="flex items-start gap-3">
+                    <Video className="h-5 w-5 mt-1 text-primary/60 flex-shrink-0" />
+                    <h3 className="text-lg font-medium leading-snug">
+                      {video.title || `Video ${video.videoId}`}
+                    </h3>
+                  </div>
+                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onClick={() => deleteVideo(video.videoId)}
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             </Card>
           ))}

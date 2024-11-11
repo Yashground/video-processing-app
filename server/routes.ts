@@ -111,6 +111,18 @@ export function registerRoutes(app: Express) {
     }
   });
 
+  // Add new endpoint for deleting individual videos
+  app.delete("/api/videos/:videoId", async (req, res) => {
+    try {
+      const videoId = req.params.videoId;
+      await db.delete(subtitles).where(eq(subtitles.videoId, videoId));
+      res.json({ message: "Video deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting video:", error);
+      res.status(500).json({ error: "Failed to delete video" });
+    }
+  });
+
   app.post("/api/summarize", async (req, res) => {
     try {
       const { text } = z.object({
