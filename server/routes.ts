@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { z } from "zod";
 import { db } from "../db";
 import { subtitles } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
 import { mkdir, unlink } from "fs/promises";
 import { join } from "path";
@@ -26,7 +26,49 @@ mkdir(tempDir, { recursive: true }).catch(err => {
 
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 
+async function getVideoMetadata(videoId: string) {
+  try {
+    const response = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
+    );
+    const data = await response.json();
+    
+    if (!data.items?.[0]) {
+      throw new Error('Video not found');
+    }
+
+    const snippet = data.items[0].snippet;
+    return {
+      title: snippet.title,
+      thumbnailUrl: snippet.thumbnails?.medium?.url || snippet.thumbnails?.default?.url
+    };
+  } catch (error) {
+    console.error('Error fetching video metadata:', error);
+    return null;
+  }
+}
+
 export function registerRoutes(app: Express) {
+  app.get("/api/videos", async (req, res) => {
+    try {
+      const videos = await db
+        .select({
+          videoId: subtitles.videoId,
+          title: subtitles.title,
+          thumbnailUrl: subtitles.thumbnailUrl,
+          createdAt: subtitles.createdAt
+        })
+        .from(subtitles)
+        .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt)
+        .orderBy(desc(subtitles.createdAt));
+
+      res.json(videos);
+    } catch (error) {
+      console.error("Error fetching videos:", error);
+      res.status(500).json({ error: "Failed to fetch video history" });
+    }
+  });
+
   app.post("/api/summarize", async (req, res) => {
     try {
       const { text } = z.object({
@@ -76,39 +118,43 @@ export function registerRoutes(app: Express) {
 
       console.log(`No existing subtitles found for ${videoId}, processing audio...`);
 
-      // If not in database, process audio and generate subtitles
+      // Fetch video metadata
+      const metadata = await getVideoMetadata(videoId);
+      if (!metadata) {
+        return res.status(400).json({ error: "Failed to fetch video metadata" });
+      }
+
+      // Process audio and generate subtitles
       try {
-        // Download audio with max duration limit
         audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
         console.log(`Successfully downloaded audio to ${audioPath}`);
         
-        // Generate transcription using Whisper
         const subtitleData = await transcribeAudio(audioPath);
         console.log(`Successfully generated transcription with ${subtitleData.length} segments in ${subtitleData[0]?.language || 'unknown'} language`);
         
-        // Add videoId to each subtitle
-        const subtitlesWithVideoId = subtitleData.map(sub => ({
+        // Add videoId and metadata to each subtitle
+        const subtitlesWithMetadata = subtitleData.map(sub => ({
           ...sub,
-          videoId
+          videoId,
+          title: metadata.title,
+          thumbnailUrl: metadata.thumbnailUrl
         }));
 
         // Save to database
-        await db.insert(subtitles).values(subtitlesWithVideoId);
+        await db.insert(subtitles).values(subtitlesWithMetadata);
         console.log(`Successfully saved subtitles to database`);
 
         // Return the subtitles
-        res.json(subtitlesWithVideoId);
+        res.json(subtitlesWithMetadata);
       } catch (error: any) {
         console.error("Error processing audio:", error);
         
-        // Clean up any incomplete downloads
         if (audioPath) {
           await unlink(audioPath).catch(err => {
             console.error("Error cleaning up audio file:", err);
           });
         }
         
-        // Handle specific error cases with improved messages
         if (error.message?.includes("too large") || error.message?.includes("maxFilesize")) {
           res.status(413).json({ 
             error: "Video file is too large (max 100MB). Please try a shorter video." 
@@ -152,7 +198,9 @@ export function registerRoutes(app: Express) {
         videoId: z.string(),
         start: z.number(),
         end: z.number(),
-        text: z.string()
+        text: z.string(),
+        title: z.string().optional(),
+        thumbnailUrl: z.string().optional()
       })).parse(req.body);
 
       await db.insert(subtitles).values(subtitleData);
