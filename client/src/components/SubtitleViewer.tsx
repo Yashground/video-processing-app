@@ -26,15 +26,17 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
     videoId ? `/api/subtitles/${videoId}` : null,
     {
       onError: (err) => {
-        let errorMessage = "Failed to process video audio.";
-        if (err.message?.includes("Maximum content size")) {
+        let errorMessage = "Failed to process audio.";
+        if (err.message?.includes("too large") || err.message?.includes("maxFilesize")) {
+          errorMessage = "Audio file is too large. Please try a shorter video.";
+        } else if (err.message?.includes("duration") || err.message?.includes("maximum limit")) {
           errorMessage = "Video is too long. Please try a shorter video (max 30 minutes).";
-        } else if (err.message?.includes("no suitable")) {
-          errorMessage = "Could not download audio from this video. Please try another video.";
+        } else if (err.message?.includes("unavailable") || err.message?.includes("private")) {
+          errorMessage = "Video is unavailable or private. Please try another video.";
         }
         
         toast({
-          title: "Error",
+          title: "Audio Processing Error",
           description: errorMessage,
           variant: "destructive"
         });
@@ -50,48 +52,54 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
 
   if (!videoId) {
     return (
-      <Card className="h-full p-4">
-        <div className="text-muted-foreground">Load a video to see subtitles</div>
-      </Card>
+      <div className="p-8 text-center text-muted-foreground">
+        Enter a YouTube URL above to extract audio and generate subtitles
+      </div>
     );
   }
 
   if (error) {
     return (
-      <Card className="h-full p-4">
+      <div className="p-4">
         <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
+          <AlertTitle>Audio Processing Failed</AlertTitle>
           <AlertDescription>
-            Failed to load subtitles. This might be because:
+            We couldn't process the audio because:
             <ul className="list-disc list-inside mt-2">
-              <li>The video is too long (max 30 minutes)</li>
-              <li>The video is not accessible</li>
-              <li>There was an error processing the audio</li>
+              <li>The video might be too long (max 30 minutes)</li>
+              <li>The video might be private or unavailable</li>
+              <li>There might be an issue with the audio extraction</li>
             </ul>
           </AlertDescription>
         </Alert>
         <Button onClick={handleRetry} className="w-full">
-          Try Again
+          Try Processing Again
         </Button>
-      </Card>
+      </div>
     );
   }
 
   return (
-    <Card className="h-full p-4">
-      <ScrollArea className="h-full">
+    <div className="p-4">
+      <ScrollArea className="h-[400px]">
         <div className="space-y-2">
           {isValidating ? (
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Processing video audio...
+                Extracting and Processing Audio...
               </div>
               <Alert>
-                <AlertTitle>Processing Large Video</AlertTitle>
+                <AlertTitle>Processing Audio</AlertTitle>
                 <AlertDescription>
-                  This might take a few minutes for longer videos. Please wait...
+                  We're currently:
+                  <ul className="list-disc list-inside mt-2">
+                    <li>Downloading the audio from YouTube</li>
+                    <li>Converting it to the right format</li>
+                    <li>Generating subtitles using AI</li>
+                  </ul>
+                  This might take a few minutes depending on the video length.
                 </AlertDescription>
               </Alert>
             </div>
@@ -111,10 +119,10 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
               </div>
             ))
           ) : (
-            <div className="text-muted-foreground">No subtitles available</div>
+            <div className="text-center text-muted-foreground">No subtitles available</div>
           )}
         </div>
       </ScrollArea>
-    </Card>
+    </div>
   );
 }

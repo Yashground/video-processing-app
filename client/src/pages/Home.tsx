@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -7,7 +6,6 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Form, FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form";
-import VideoPlayer from "../components/VideoPlayer";
 import SubtitleViewer from "../components/SubtitleViewer";
 import TranslationPanel from "../components/TranslationPanel";
 import { useToast } from "@/hooks/use-toast";
@@ -52,7 +50,7 @@ export default function Home() {
   };
 
   return (
-    <div className="container mx-auto p-4 h-screen flex flex-col gap-4">
+    <div className="container mx-auto p-4 min-h-screen flex flex-col gap-4">
       <Card className="p-4">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-2">
@@ -62,34 +60,25 @@ export default function Home() {
               render={({ field }) => (
                 <FormItem className="flex-1">
                   <FormControl>
-                    <Input placeholder="Enter YouTube URL" {...field} />
+                    <Input placeholder="Enter YouTube URL to extract audio and generate subtitles" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
               )}
             />
-            <Button type="submit">Load Video</Button>
+            <Button type="submit">Process Audio</Button>
           </form>
         </Form>
       </Card>
 
-      <ResizablePanelGroup direction="horizontal" className="flex-1">
-        <ResizablePanel defaultSize={50} minSize={30}>
-          <VideoPlayer videoId={videoId} />
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel defaultSize={50}>
-          <ResizablePanelGroup direction="vertical">
-            <ResizablePanel defaultSize={60}>
-              <SubtitleViewer videoId={videoId} />
-            </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel defaultSize={40}>
-              <TranslationPanel />
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+      <div className="flex-1 flex flex-col gap-4">
+        <Card className="flex-1">
+          <SubtitleViewer videoId={videoId} />
+        </Card>
+        <Card className="flex-1">
+          <TranslationPanel />
+        </Card>
+      </div>
     </div>
   );
 }

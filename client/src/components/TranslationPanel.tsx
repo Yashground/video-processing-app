@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -37,7 +36,7 @@ export default function TranslationPanel() {
   };
 
   return (
-    <Card className="h-full p-4 flex flex-col gap-4">
+    <div className="p-4 flex flex-col gap-4">
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-medium">Translation</h3>
         <Select value={targetLang} onValueChange={setTargetLang}>
@@ -54,12 +53,12 @@ export default function TranslationPanel() {
         </Select>
       </div>
 
-      <div className="flex-1 flex flex-col gap-4">
+      <div className="grid grid-cols-1 gap-4">
         <Textarea
-          placeholder="Enter text to translate..."
+          placeholder="Click on a subtitle above to translate it..."
           value={sourceText}
           onChange={(e) => setSourceText(e.target.value)}
-          className="flex-1"
+          className="min-h-[100px]"
         />
         <Button onClick={handleTranslate} disabled={loading || !sourceText}>
           {loading ? "Translating..." : "Translate"}
@@ -68,9 +67,9 @@ export default function TranslationPanel() {
           value={translation}
           readOnly
           placeholder="Translation will appear here..."
-          className="flex-1 bg-muted"
+          className="min-h-[100px] bg-muted"
         />
       </div>
-    </Card>
+    </div>
   );
 }
