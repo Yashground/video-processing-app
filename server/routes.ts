@@ -20,6 +20,14 @@ const openai = new OpenAI({
 // Configure ffmpeg path
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
+// Authentication middleware
+function requireAuth(req: any, res: any, next: any) {
+  if (!req.isAuthenticated()) {
+    return res.status(401).json({ message: "Authentication required" });
+  }
+  next();
+}
+
 // Ensure temp directory exists
 const tempDir = join(process.cwd(), 'temp');
 mkdir(tempDir, { recursive: true }).catch(err => {
@@ -64,7 +72,7 @@ async function getVideoMetadata(videoId: string) {
 
 export function registerRoutes(app: Express) {
   // Get all videos with total time saved
-  app.get("/api/videos", withErrorHandler(async (req, res) => {
+  app.get("/api/videos", requireAuth, withErrorHandler(async (req, res) => {
     const videos = await db
       .select({
         videoId: subtitles.videoId,
@@ -74,12 +82,14 @@ export function registerRoutes(app: Express) {
         timeSaved: subtitles.timeSaved
       })
       .from(subtitles)
+      .where(eq(subtitles.userId, req.user!.id))
       .groupBy(subtitles.videoId, subtitles.title, subtitles.thumbnailUrl, subtitles.createdAt, subtitles.timeSaved)
       .orderBy(desc(subtitles.createdAt));
 
     const totalTimeSaved = await db
       .select({ total: sum(subtitles.timeSaved) })
-      .from(subtitles);
+      .from(subtitles)
+      .where(eq(subtitles.userId, req.user!.id));
 
     const updatedVideos = await Promise.all(
       videos.map(async (video) => {
@@ -111,10 +121,11 @@ export function registerRoutes(app: Express) {
   }));
 
   // Export videos
-  app.get("/api/videos/export", withErrorHandler(async (req, res) => {
+  app.get("/api/videos/export", requireAuth, withErrorHandler(async (req, res) => {
     const allVideos = await db
       .select()
       .from(subtitles)
+      .where(eq(subtitles.userId, req.user!.id))
       .orderBy(desc(subtitles.createdAt));
 
     const videoMap = allVideos.reduce((acc, subtitle) => {
@@ -146,13 +157,13 @@ export function registerRoutes(app: Express) {
   }));
 
   // Clear all videos
-  app.delete("/api/videos", withErrorHandler(async (req, res) => {
-    await db.delete(subtitles);
+  app.delete("/api/videos", requireAuth, withErrorHandler(async (req, res) => {
+    await db.delete(subtitles).where(eq(subtitles.userId, req.user!.id));
     res.json({ message: "History cleared successfully" });
   }));
 
   // Get cache stats
-  app.get("/api/cache/stats", withErrorHandler((req, res) => {
+  app.get("/api/cache/stats", requireAuth, withErrorHandler((req, res) => {
     const cache = VideoCache.getInstance();
     const stats = cache.getCacheStats();
     res.json({
@@ -162,7 +173,7 @@ export function registerRoutes(app: Express) {
   }));
 
   // Delete cache entry
-  app.delete("/api/cache/:videoId", withErrorHandler(async (req, res) => {
+  app.delete("/api/cache/:videoId", requireAuth, withErrorHandler(async (req, res) => {
     const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
     const cache = VideoCache.getInstance();
     await cache.invalidateCache(videoId);
@@ -170,12 +181,14 @@ export function registerRoutes(app: Express) {
   }));
 
   // Delete video
-  app.delete("/api/videos/:videoId", withErrorHandler(async (req, res) => {
+  app.delete("/api/videos/:videoId", requireAuth, withErrorHandler(async (req, res) => {
     const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
     const cache = VideoCache.getInstance();
     
     await Promise.all([
-      db.delete(subtitles).where(eq(subtitles.videoId, videoId)),
+      db.delete(subtitles)
+        .where(eq(subtitles.videoId, videoId))
+        .where(eq(subtitles.userId, req.user!.id)),
       cache.invalidateCache(videoId)
     ]);
     
@@ -183,7 +196,7 @@ export function registerRoutes(app: Express) {
   }));
 
   // Generate summary
-  app.post("/api/summarize", withErrorHandler(async (req, res) => {
+  app.post("/api/summarize", requireAuth, withErrorHandler(async (req, res) => {
     const { text } = await z.object({ text: textSchema }).parseAsync(req.body).catch(error => {
       if (error.issues?.[0]?.code === 'too_big') {
         throw new AppError(400, 'Text is too long for summarization. Maximum length is 25,000 characters.');
@@ -235,7 +248,7 @@ export function registerRoutes(app: Express) {
   }));
 
   // Get subtitles
-  app.get("/api/subtitles/:videoId", withErrorHandler(async (req, res) => {
+  app.get("/api/subtitles/:videoId", requireAuth, withErrorHandler(async (req, res) => {
     const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
     let audioPath: string | null = null;
     
@@ -243,6 +256,7 @@ export function registerRoutes(app: Express) {
     const existingSubtitles = await db.select()
       .from(subtitles)
       .where(eq(subtitles.videoId, videoId))
+      .where(eq(subtitles.userId, req.user!.id))
       .orderBy(subtitles.start);
 
     if (existingSubtitles.length > 0) {
@@ -256,7 +270,8 @@ export function registerRoutes(app: Express) {
               title: metadata.title,
               thumbnailUrl: metadata.thumbnailUrl
             })
-            .where(eq(subtitles.videoId, videoId));
+            .where(eq(subtitles.videoId, videoId))
+            .where(eq(subtitles.userId, req.user!.id));
           existingSubtitles.forEach(subtitle => {
             subtitle.title = metadata.title;
             subtitle.thumbnailUrl = metadata.thumbnailUrl;
@@ -269,6 +284,11 @@ export function registerRoutes(app: Express) {
     }
 
     try {
+      // Ensure user is authenticated
+      if (!req.user?.id) {
+        throw new AppError(401, "Authentication required");
+      }
+
       // Get video metadata before processing
       const metadata = await getVideoMetadata(videoId);
 
@@ -287,7 +307,8 @@ export function registerRoutes(app: Express) {
         videoId,
         title: metadata.title,
         thumbnailUrl: metadata.thumbnailUrl,
-        timeSaved: index === 0 ? timeSaved : 0 // Store time saved only in the first subtitle record
+        timeSaved: index === 0 ? timeSaved : 0,
+        userId: req.user!.id  // Add the user_id from the authenticated session
       }));
 
       await db.insert(subtitles).values(subtitlesWithMetadata);
@@ -300,7 +321,7 @@ export function registerRoutes(app: Express) {
   }));
 
   // Translate text
-  app.post("/api/translate", withErrorHandler(async (req, res) => {
+  app.post("/api/translate", requireAuth, withErrorHandler(async (req, res) => {
     const { text, targetLanguage } = await z.object({
       text: textSchema,
       targetLanguage: languageSchema
