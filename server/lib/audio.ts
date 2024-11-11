@@ -10,9 +10,12 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const MAX_CHUNK_SIZE = 24 * 1024 * 1024; // 24MB
-const CHUNK_DURATION = 1800; // 30 minutes in seconds
+// Optimized chunk sizes based on testing
+const MAX_CHUNK_SIZE = 25 * 1024 * 1024; // 25MB for optimal OpenAI API performance
+const CHUNK_DURATION = 600; // 10 minutes in seconds for better parallelization
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000;
 
 interface AudioSegment {
   path: string;
@@ -26,6 +29,32 @@ interface TranscriptionResult {
   language?: string;
 }
 
+// Utility function for exponential backoff
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  retries = MAX_RETRIES,
+  delay = RETRY_DELAY
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (retries > 0) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return withRetry(operation, retries - 1, delay * 2);
+    }
+    throw error;
+  }
+}
+
+// Clean up function to handle file deletion
+async function cleanupFile(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    console.warn(`Failed to cleanup file ${filePath}:`, error);
+  }
+}
+
 export async function downloadAudio(videoId: string, maxLength?: number): Promise<string> {
   const tempDir = join(process.cwd(), 'temp');
   await mkdir(tempDir, { recursive: true });
@@ -34,50 +63,36 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
   
   try {
     // Clean up any existing file
-    await unlink(audioPath).catch(() => {});
+    await cleanupFile(audioPath);
     
-    let attempts = 3;
-    while (attempts > 0) {
-      try {
-        console.log(`[1/2] Downloading audio for video ${videoId} (attempt ${4 - attempts}/3)`);
-        
-        await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
-          extractAudio: true,
-          audioFormat: 'm4a',
-          audioQuality: 0,
-          output: audioPath,
-          maxFilesize: '100M', // Increased for longer videos
-          matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
-          noWarnings: true,
-          addHeader: [
-            'referer:youtube.com',
-            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
-          ]
-        });
-        
-        // Verify file exists and is accessible
-        const audioStats = await stat(audioPath);
-        console.log(`[2/2] Successfully downloaded audio: ${audioStats.size} bytes`);
-        break;
-      } catch (error) {
-        attempts--;
-        console.error(`Download attempt failed (${attempts} attempts remaining):`, error);
-        
-        // Clean up any failed files
-        await unlink(audioPath).catch(() => {});
-        
-        if (attempts === 0) throw error;
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    }
+    console.log(`[1/2] Downloading audio for video ${videoId}`);
+    
+    await withRetry(async () => {
+      await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
+        extractAudio: true,
+        audioFormat: 'm4a',
+        audioQuality: 0,
+        output: audioPath,
+        maxFilesize: '100M',
+        matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
+        noWarnings: true,
+        addHeader: [
+          'referer:youtube.com',
+          'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
+        ]
+      });
+
+      // Verify file exists and is accessible
+      const audioStats = await stat(audioPath);
+      console.log(`[2/2] Successfully downloaded audio: ${audioStats.size} bytes`);
+    });
     
     return audioPath;
   } catch (error: any) {
     console.error('Error downloading audio:', error);
+    await cleanupFile(audioPath);
     
-    // Clean up any failed files
-    await unlink(audioPath).catch(() => {});
-    
+    // Enhanced error handling with specific messages
     if (error.stderr?.includes('Video unavailable')) {
       throw new Error('Video is unavailable or private');
     } else if (error.stderr?.includes('maxFilesize')) {
@@ -88,8 +103,6 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
       throw new Error('Video is not accessible due to copyright restrictions');
     } else if (error.code === 'ENOENT') {
       throw new Error('Failed to save audio file');
-    } else if (error.stderr?.includes('format')) {
-      throw new Error('Failed to extract audio in the required format');
     }
     
     throw new Error('Failed to download video audio');
@@ -112,12 +125,12 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       const numChunks = Math.ceil(duration / CHUNK_DURATION);
       
       try {
-        for (let i = 0; i < numChunks; i++) {
+        // Process chunks in parallel with a limit
+        const chunkPromises = Array.from({ length: numChunks }, async (_, i) => {
           const startTime = i * CHUNK_DURATION;
           const segmentPath = join(tempDir, `${basename(audioPath, '.m4a')}_${i}.m4a`);
           
-          // Clean up any existing segment file
-          await unlink(segmentPath).catch(() => {});
+          await cleanupFile(segmentPath);
           
           await new Promise<void>((res, rej) => {
             ffmpeg(audioPath)
@@ -132,16 +145,24 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
               .run();
           });
           
-          // Verify segment file exists
           await stat(segmentPath);
-          segments.push({ path: segmentPath, startTime: startTime * 1000 });
+          return { path: segmentPath, startTime: startTime * 1000 };
+        });
+
+        // Process chunks in parallel with a limit of 3 concurrent operations
+        const parallelLimit = 3;
+        const results = [];
+        for (let i = 0; i < chunkPromises.length; i += parallelLimit) {
+          const batch = chunkPromises.slice(i, i + parallelLimit);
+          const batchResults = await Promise.all(batch);
+          results.push(...batchResults);
         }
         
-        resolve(segments);
+        resolve(results.sort((a, b) => a.startTime - b.startTime));
       } catch (error) {
         console.error('Error splitting audio:', error);
         // Clean up any created segments
-        await Promise.all(segments.map(segment => unlink(segment.path).catch(() => {})));
+        await Promise.all(segments.map(segment => cleanupFile(segment.path)));
         reject(error);
       }
     });
@@ -150,88 +171,83 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
 
 export async function transcribeAudio(audioPath: string): Promise<TranscriptionResult[]> {
   try {
-    // Verify input file exists
     const stats = await stat(audioPath);
     const fileSize = stats.size;
     
     let transcriptionLanguage: string | undefined;
+    let allSubtitles: TranscriptionResult[] = [];
     
     if (fileSize > MAX_CHUNK_SIZE) {
-      // Split audio into chunks and process each chunk
       const segments = await splitAudio(audioPath);
-      let allSubtitles: TranscriptionResult[] = [];
       
-      for (const segment of segments) {
-        try {
-          const transcription = await openai.audio.transcriptions.create({
-            file: createReadStream(segment.path),
-            model: "whisper-1",
-            response_format: "verbose_json",
-            language: transcriptionLanguage // Use detected language for consistency
-          });
-          
-          // Detect language from first segment if not already detected
-          if (!transcriptionLanguage && transcription.language) {
-            transcriptionLanguage = transcription.language;
-            console.log(`Detected language: ${transcriptionLanguage}`);
-          }
-          
-          if (transcription.segments) {
-            const subtitles = transcription.segments.map(seg => ({
+      // Process segments in parallel with a limit
+      const parallelLimit = 2;
+      for (let i = 0; i < segments.length; i += parallelLimit) {
+        const batch = segments.slice(i, i + parallelLimit);
+        const batchResults = await Promise.all(batch.map(async segment => {
+          try {
+            const transcription = await withRetry(async () => {
+              return await openai.audio.transcriptions.create({
+                file: createReadStream(segment.path),
+                model: "whisper-1",
+                response_format: "verbose_json",
+                language: transcriptionLanguage
+              });
+            });
+            
+            if (!transcriptionLanguage && transcription.language) {
+              transcriptionLanguage = transcription.language;
+              console.log(`Detected language: ${transcriptionLanguage}`);
+            }
+            
+            return transcription.segments?.map(seg => ({
               start: Math.floor(seg.start * 1000) + segment.startTime,
               end: Math.floor(seg.end * 1000) + segment.startTime,
               text: seg.text.trim(),
               language: transcriptionLanguage
-            }));
-            
-            allSubtitles = [...allSubtitles, ...subtitles];
+            })) || [];
+          } finally {
+            await cleanupFile(segment.path);
           }
-        } catch (error) {
-          console.error('Error transcribing segment:', error);
-          throw error;
-        } finally {
-          // Clean up segment file
-          await unlink(segment.path).catch(console.error);
-        }
+        }));
+        
+        allSubtitles = [...allSubtitles, ...batchResults.flat()];
       }
-      
-      // Clean up original file
-      await unlink(audioPath).catch(console.error);
-      
-      if (allSubtitles.length === 0) {
-        throw new Error('No transcription segments generated');
-      }
-      
-      return allSubtitles;
     } else {
-      // Process single file
-      const transcription = await openai.audio.transcriptions.create({
-        file: createReadStream(audioPath),
-        model: "whisper-1",
-        response_format: "verbose_json"
+      const transcription = await withRetry(async () => {
+        return await openai.audio.transcriptions.create({
+          file: createReadStream(audioPath),
+          model: "whisper-1",
+          response_format: "verbose_json"
+        });
       });
       
-      // Clean up original file
-      await unlink(audioPath).catch(console.error);
+      transcriptionLanguage = transcription.language;
+      console.log(`Detected language: ${transcriptionLanguage}`);
       
       if (!transcription.segments || transcription.segments.length === 0) {
         throw new Error('No transcription segments found');
       }
       
-      transcriptionLanguage = transcription.language;
-      console.log(`Detected language: ${transcriptionLanguage}`);
-      
-      return transcription.segments.map(segment => ({
+      allSubtitles = transcription.segments.map(segment => ({
         start: Math.floor(segment.start * 1000),
         end: Math.floor(segment.end * 1000),
         text: segment.text.trim(),
         language: transcriptionLanguage
       }));
     }
+    
+    // Clean up original file
+    await cleanupFile(audioPath);
+    
+    if (allSubtitles.length === 0) {
+      throw new Error('No transcription segments generated');
+    }
+    
+    return allSubtitles;
   } catch (error) {
     console.error('Transcription error:', error);
-    // Ensure cleanup of input file
-    await unlink(audioPath).catch(console.error);
+    await cleanupFile(audioPath);
     throw error;
   }
 }
