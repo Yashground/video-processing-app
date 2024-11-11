@@ -1,8 +1,10 @@
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card } from "@/components/ui/card";
-import useSWR from "swr";
-import { Clock, Loader2, Video } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import useSWR, { mutate } from "swr";
+import { Clock, Loader2, Video, Trash2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 interface VideoMetadata {
   videoId: string;
@@ -17,6 +19,33 @@ interface HistorySidebarProps {
 
 export default function HistorySidebar({ onVideoSelect, selectedVideoId, className }: HistorySidebarProps) {
   const { data: videos, isLoading } = useSWR<VideoMetadata[]>('/api/videos');
+  const { toast } = useToast();
+
+  const clearHistory = async () => {
+    try {
+      const response = await fetch('/api/videos', {
+        method: 'DELETE',
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to clear history');
+      }
+
+      // Refresh the videos list
+      await mutate('/api/videos');
+      
+      toast({
+        title: "History Cleared",
+        description: "Your video history has been cleared successfully.",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to clear history. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
 
   if (isLoading) {
     return (
@@ -37,9 +66,22 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
   return (
     <div className={cn("w-80 border-r bg-muted/10", className)}>
       <div className="p-6 border-b">
-        <div className="flex items-center gap-3">
-          <Clock className="h-6 w-6 text-primary" />
-          <h2 className="text-xl font-semibold">History</h2>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Clock className="h-6 w-6 text-primary" />
+            <h2 className="text-xl font-semibold">History</h2>
+          </div>
+          {videos && videos.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={clearHistory}
+              className="flex items-center gap-2 text-destructive hover:text-destructive"
+            >
+              <Trash2 className="h-4 w-4" />
+              Clear
+            </Button>
+          )}
         </div>
       </div>
       <ScrollArea className="h-[calc(100vh-5rem)]">

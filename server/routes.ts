@@ -100,6 +100,17 @@ export function registerRoutes(app: Express) {
     }
   });
 
+  // Add new clear history endpoint
+  app.delete("/api/videos", async (req, res) => {
+    try {
+      await db.delete(subtitles);
+      res.json({ message: "History cleared successfully" });
+    } catch (error) {
+      console.error("Error clearing history:", error);
+      res.status(500).json({ error: "Failed to clear history" });
+    }
+  });
+
   app.post("/api/summarize", async (req, res) => {
     try {
       const { text } = z.object({
