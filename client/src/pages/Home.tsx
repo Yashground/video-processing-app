@@ -8,7 +8,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { Form, FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form";
 import SubtitleViewer from "../components/SubtitleViewer";
 import SummaryPanel from "../components/SummaryPanel";
-import FlashcardPanel from "../components/FlashcardPanel";
 import HistorySidebar from "../components/HistorySidebar";
 import { useToast } from "@/hooks/use-toast";
 import { Youtube } from "lucide-react";
@@ -33,7 +32,6 @@ const urlSchema = z.object({
 export default function Home() {
   const [videoId, setVideoId] = useState<string | null>(null);
   const [transcribedText, setTranscribedText] = useState<string>("");
-  const [selectedText, setSelectedText] = useState<string>("");
   const { toast } = useToast();
   
   const form = useForm<z.infer<typeof urlSchema>>({
@@ -57,7 +55,6 @@ export default function Home() {
       if (id) {
         setVideoId(id);
         setTranscribedText("");
-        setSelectedText("");
       } else {
         toast({
           title: "Invalid URL",
@@ -71,13 +68,6 @@ export default function Home() {
         description: "Failed to parse video URL",
         variant: "destructive"
       });
-    }
-  };
-
-  const handleTextSelection = () => {
-    const selection = window.getSelection();
-    if (selection && selection.toString().trim()) {
-      setSelectedText(selection.toString().trim());
     }
   };
 
@@ -125,26 +115,15 @@ export default function Home() {
 
           <div className="space-y-8">
             <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
-              <div onMouseUp={handleTextSelection}>
-                <SubtitleViewer 
-                  videoId={videoId} 
-                  onTextUpdate={setTranscribedText}
-                />
-              </div>
+              <SubtitleViewer 
+                videoId={videoId} 
+                onTextUpdate={setTranscribedText}
+              />
             </Card>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-              <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
-                <SummaryPanel text={transcribedText} />
-              </Card>
-
-              <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
-                <FlashcardPanel 
-                  videoId={videoId}
-                  selectedText={selectedText}
-                />
-              </Card>
-            </div>
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+              <SummaryPanel text={transcribedText} />
+            </Card>
           </div>
         </div>
       </div>
