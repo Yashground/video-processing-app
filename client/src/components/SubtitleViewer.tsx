@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
@@ -13,6 +13,14 @@ interface Subtitle {
   end: number;
   text: string;
   language?: string;
+}
+
+interface ProgressUpdate {
+  videoId: string;
+  stage: 'download' | 'processing' | 'transcription';
+  progress: number;
+  message?: string;
+  error?: string;
 }
 
 interface SubtitleViewerProps {
@@ -38,6 +46,9 @@ const languageNames: { [key: string]: string } = {
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const [progress, setProgress] = useState(0);
+  const [progressMessage, setProgressMessage] = useState<string>("");
+  const [progressStage, setProgressStage] = useState<string>("");
+  const wsRef = useRef<WebSocket | null>(null);
   const { toast } = useToast();
   
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
@@ -73,33 +84,52 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, [subtitles, onTextUpdate]);
 
+  // WebSocket connection for progress updates
   useEffect(() => {
-    if (isValidating) {
-      const stages = [
-        { threshold: 20, speed: 800 },
-        { threshold: 40, speed: 1000 },
-        { threshold: 60, speed: 1200 },
-        { threshold: 80, speed: 1500 },
-        { threshold: 95, speed: 2000 }
-      ];
+    if (!videoId) return;
 
-      const interval = setInterval(() => {
-        setProgress(p => {
-          const stage = stages.find(s => p < s.threshold);
-          if (!stage || p >= 95) return p;
-          return p + (100 - p) / stage.speed * 10;
-        });
-      }, 100);
-      
-      return () => clearInterval(interval);
-    } else {
-      setProgress(0);
-    }
-  }, [isValidating]);
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/progress`);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const update: ProgressUpdate = JSON.parse(event.data);
+        if (update.videoId === videoId) {
+          if (update.error) {
+            toast({
+              title: "Processing Error",
+              description: update.error,
+              variant: "destructive"
+            });
+          } else {
+            setProgress(update.progress);
+            setProgressMessage(update.message || "");
+            setProgressStage(update.stage);
+          }
+        }
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [videoId, toast]);
 
   const handleRetry = () => {
     setRetryCount(count => count + 1);
     setProgress(0);
+    setProgressMessage("");
+    setProgressStage("");
     mutate(videoId ? `/api/subtitles/${videoId}` : null);
   };
 
@@ -159,34 +189,28 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           <div className="space-y-6">
             <div className="flex items-center gap-3 text-primary text-lg">
               <Loader2 className="h-5 w-5 animate-spin" />
-              Processing Audio...
+              {progressMessage || "Processing Audio..."}
             </div>
             <div className="relative">
               <Progress 
                 value={progress} 
                 className="h-2 bg-primary/20 transition-all duration-300"
-                style={{
-                  background: 'linear-gradient(to right, hsl(var(--primary)) var(0%), hsl(var(--primary)/0.2) var(0%))',
-                  backgroundSize: '200% 100%',
-                  animation: 'gradient 2s linear infinite'
-                }}
               />
-              <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-r from-primary/20 to-primary/10 animate-pulse" style={{ clipPath: `inset(0 ${100 - progress}% 0 0)` }} />
             </div>
             <Alert className="bg-muted/50 border-primary/20">
               <AlertTitle className="text-lg font-semibold mb-2">Processing Steps</AlertTitle>
               <AlertDescription className="text-base space-y-4">
                 <ul className="list-disc list-inside space-y-2">
-                  <li className={`transition-colors duration-300 ${progress > 30 ? "text-muted-foreground" : ""}`}>
+                  <li className={`transition-colors duration-300 ${progressStage === 'download' ? 'text-primary' : progress > 30 ? "text-muted-foreground" : ""}`}>
                     Downloading audio from YouTube
                   </li>
-                  <li className={`transition-colors duration-300 ${progress > 50 ? "text-muted-foreground" : ""}`}>
+                  <li className={`transition-colors duration-300 ${progressStage === 'processing' ? 'text-primary' : progress > 50 ? "text-muted-foreground" : ""}`}>
                     Preparing audio for processing
                   </li>
-                  <li className={`transition-colors duration-300 ${progress > 70 ? "text-muted-foreground" : ""}`}>
+                  <li className={`transition-colors duration-300 ${progressStage === 'transcription' ? 'text-primary' : progress > 70 ? "text-muted-foreground" : ""}`}>
                     Detecting language and transcribing
                   </li>
-                  <li>
+                  <li className={progress === 100 ? "text-primary" : ""}>
                     Generating final transcription
                   </li>
                 </ul>
