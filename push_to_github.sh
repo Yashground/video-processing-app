@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Remove existing remote if it exists
+git remote remove origin || true
+
 # Configure git with token-based authentication
 git config --global url."https://${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
 
@@ -18,5 +21,5 @@ git commit -m "Initial commit: Video processing application with security measur
 
 # Create and push to main branch
 git branch -M main
-git remote add origin https://github.com/user/video-text-extractor.git
+git remote add origin https://github.com/replit-user/video-processing-app.git
 git push -u origin main --force
