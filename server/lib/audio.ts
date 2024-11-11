@@ -1,7 +1,7 @@
 import { OpenAI } from 'openai';
 import { createWriteStream, createReadStream } from 'fs';
 import { unlink, stat } from 'fs/promises';
-import { join } from 'path';
+import { join, basename } from 'path';
 import youtubeDl from 'youtube-dl-exec';
 import ffmpeg from 'fluent-ffmpeg';
 import { promisify } from 'util';
@@ -21,17 +21,33 @@ interface AudioSegment {
 export async function downloadAudio(videoId: string, maxLength?: number): Promise<string> {
   const outputPath = join(process.cwd(), 'temp', `${videoId}.mp3`);
   
-  await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
-    extractAudio: true,
-    audioFormat: 'mp3',
-    audioQuality: 0, // 0 is the worst quality
-    output: outputPath,
-    maxFilesize: '25M',
-    postprocessorArgs: ['-b:a', '64k'], // Set bitrate to 64k
-    ...(maxLength && { maxDuration: maxLength })
-  });
+  try {
+    await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      audioQuality: 0,
+      output: outputPath,
+      maxFilesize: '25M',
+      matchFilter: maxLength ? `duration <= ${maxLength}` : undefined,
+      postprocessorArgs: ['-b:a', '64k'],
+    });
 
-  return outputPath;
+    return outputPath;
+  } catch (error: any) {
+    console.error('Error downloading audio:', error);
+    // Clean up any partially downloaded files
+    await unlink(outputPath).catch(() => {});
+    
+    if (error.stderr?.includes('Video unavailable')) {
+      throw new Error('Video is unavailable or private');
+    } else if (error.stderr?.includes('maxFilesize')) {
+      throw new Error('Video file is too large');
+    } else if (error.stderr?.includes('duration')) {
+      throw new Error('Video duration exceeds the maximum limit');
+    }
+    
+    throw error;
+  }
 }
 
 async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
@@ -45,26 +61,33 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       const duration = metadata.format.duration || 0;
       const numChunks = Math.ceil(duration / CHUNK_DURATION);
       
-      for (let i = 0; i < numChunks; i++) {
-        const startTime = i * CHUNK_DURATION;
-        const segmentPath = join(tempDir, `${path.basename(audioPath, '.mp3')}_${i}.mp3`);
+      try {
+        for (let i = 0; i < numChunks; i++) {
+          const startTime = i * CHUNK_DURATION;
+          const segmentPath = join(tempDir, `${basename(audioPath, '.mp3')}_${i}.mp3`);
+          
+          await new Promise<void>((res, rej) => {
+            ffmpeg(audioPath)
+              .setStartTime(startTime)
+              .setDuration(CHUNK_DURATION)
+              .output(segmentPath)
+              .audioCodec('libmp3lame')
+              .audioBitrate('64k')
+              .on('end', () => res())
+              .on('error', rej)
+              .run();
+          });
+          
+          segments.push({ path: segmentPath, startTime: startTime * 1000 }); // Convert to milliseconds
+        }
         
-        await new Promise<void>((res, rej) => {
-          ffmpeg(audioPath)
-            .setStartTime(startTime)
-            .setDuration(CHUNK_DURATION)
-            .output(segmentPath)
-            .audioCodec('libmp3lame')
-            .audioBitrate('64k')
-            .on('end', () => res())
-            .on('error', rej)
-            .run();
-        });
-        
-        segments.push({ path: segmentPath, startTime: startTime * 1000 }); // Convert to milliseconds
+        resolve(segments);
+      } catch (error) {
+        console.error('Error splitting audio:', error);
+        // Clean up any created segments
+        segments.forEach(segment => unlink(segment.path).catch(() => {}));
+        reject(error);
       }
-      
-      resolve(segments);
     });
   });
 }
@@ -86,13 +109,15 @@ export async function transcribeAudio(audioPath: string): Promise<Array<{start: 
           response_format: "verbose_json"
         });
         
-        const subtitles = transcription.segments.map(seg => ({
-          start: Math.floor(seg.start * 1000) + segment.startTime,
-          end: Math.floor(seg.end * 1000) + segment.startTime,
-          text: seg.text.trim()
-        }));
-        
-        allSubtitles = [...allSubtitles, ...subtitles];
+        if (transcription.segments) {
+          const subtitles = transcription.segments.map(seg => ({
+            start: Math.floor(seg.start * 1000) + segment.startTime,
+            end: Math.floor(seg.end * 1000) + segment.startTime,
+            text: seg.text.trim()
+          }));
+          
+          allSubtitles = [...allSubtitles, ...subtitles];
+        }
         
         // Clean up segment file
         await unlink(segment.path).catch(console.error);
@@ -111,6 +136,10 @@ export async function transcribeAudio(audioPath: string): Promise<Array<{start: 
       });
       
       await unlink(audioPath).catch(console.error);
+      
+      if (!transcription.segments) {
+        throw new Error('No transcription segments found');
+      }
       
       return transcription.segments.map(segment => ({
         start: Math.floor(segment.start * 1000),
