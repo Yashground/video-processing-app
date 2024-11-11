@@ -14,13 +14,19 @@ const openai = new OpenAI({
 
 // Optimized chunk sizes and processing configurations
 const MAX_CHUNK_SIZE = 25 * 1024 * 1024; // 25MB for optimal OpenAI API performance
-const CHUNK_DURATION = 300; // 5 minutes in seconds for faster parallel processing
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
-const PARALLEL_LIMIT = 4;
 const CACHE_SIZE = 10;
 const BUFFER_SIZE = 1024 * 1024; // 1MB buffer size for streaming
+
+// Smart chunking configuration
+const CHUNK_SIZE_CONFIG = {
+  SHORT: { duration: 200, parallel: 2 },    // 0-15 minutes
+  MEDIUM: { duration: 300, parallel: 4 },   // 15-45 minutes
+  LONG: { duration: 400, parallel: 6 },     // 45-90 minutes
+  EXTENDED: { duration: 500, parallel: 8 }  // 90+ minutes
+};
 
 // Simple in-memory LRU cache for processed segments
 class SegmentCache {
@@ -66,6 +72,19 @@ interface TranscriptionResult {
   end: number;
   text: string;
   language?: string;
+}
+
+// Get chunk configuration based on video duration
+function getChunkConfig(duration: number) {
+  if (duration <= 900) { // 15 minutes
+    return CHUNK_SIZE_CONFIG.SHORT;
+  } else if (duration <= 2700) { // 45 minutes
+    return CHUNK_SIZE_CONFIG.MEDIUM;
+  } else if (duration <= 5400) { // 90 minutes
+    return CHUNK_SIZE_CONFIG.LONG;
+  } else {
+    return CHUNK_SIZE_CONFIG.EXTENDED;
+  }
 }
 
 // Utility function for exponential backoff
@@ -188,11 +207,14 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
       }
       
       const duration = metadata.format.duration || 0;
-      const numChunks = Math.ceil(duration / CHUNK_DURATION);
+      const chunkConfig = getChunkConfig(duration);
+      const numChunks = Math.ceil(duration / chunkConfig.duration);
+      
+      console.log(`Using chunk configuration: ${chunkConfig.duration}s chunks with ${chunkConfig.parallel} parallel processes`);
       
       try {
         const chunkPromises = Array.from({ length: numChunks }, async (_, i) => {
-          const startTime = i * CHUNK_DURATION;
+          const startTime = i * chunkConfig.duration;
           const segmentPath = join(tempDir, `${basename(audioPath, '.mp3')}_${i}.mp3`);
           
           await cleanupFile(segmentPath);
@@ -200,7 +222,7 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
           await new Promise<void>((res, rej) => {
             ffmpeg(audioPath)
               .setStartTime(startTime)
-              .setDuration(Math.min(CHUNK_DURATION, duration - startTime))
+              .setDuration(Math.min(chunkConfig.duration, duration - startTime))
               .audioFrequency(16000)
               .audioChannels(1)
               .audioBitrate('128k')
@@ -222,10 +244,10 @@ export async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
           return { path: segmentPath, startTime: startTime * 1000 };
         });
 
-        // Process chunks in parallel with increased limit
+        // Process chunks in parallel with dynamic limit
         const results = [];
-        for (let i = 0; i < chunkPromises.length; i += PARALLEL_LIMIT) {
-          const batch = chunkPromises.slice(i, i + PARALLEL_LIMIT);
+        for (let i = 0; i < chunkPromises.length; i += chunkConfig.parallel) {
+          const batch = chunkPromises.slice(i, i + chunkConfig.parallel);
           const batchResults = await Promise.all(batch);
           results.push(...batchResults);
         }
@@ -258,10 +280,17 @@ export async function transcribeAudio(audioPath: string): Promise<TranscriptionR
     
     if (fileSize > MAX_CHUNK_SIZE) {
       const segments = await splitAudio(audioPath);
+      const chunkConfig = await new Promise<{ parallel: number }>((resolve, reject) => {
+        ffmpeg.ffprobe(audioPath, (err, metadata) => {
+          if (err) reject(err);
+          const duration = metadata.format.duration || 0;
+          resolve(getChunkConfig(duration));
+        });
+      });
       
-      // Process segments in parallel with increased limit
-      for (let i = 0; i < segments.length; i += PARALLEL_LIMIT) {
-        const batch = segments.slice(i, i + PARALLEL_LIMIT);
+      // Process segments in parallel with dynamic limit
+      for (let i = 0; i < segments.length; i += chunkConfig.parallel) {
+        const batch = segments.slice(i, i + chunkConfig.parallel);
         const batchResults = await Promise.all(batch.map(async segment => {
           try {
             const transcription = await withRetry(async () => {
