@@ -3,7 +3,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, AlertCircle, Globe, RefreshCw } from "lucide-react";
+import { Loader2, AlertCircle, Globe, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -116,6 +116,37 @@ function ProgressStages({ stage, substage }: { stage: string, substage?: string 
   );
 }
 
+function ConnectionStatus({ connected, retrying, onRetry }: { connected: boolean; retrying: boolean; onRetry: () => void }) {
+  return (
+    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm ${
+      connected ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'
+    }`}>
+      {connected ? (
+        <>
+          <Wifi className="h-4 w-4" />
+          <span>Connected</span>
+        </>
+      ) : (
+        <>
+          <WifiOff className="h-4 w-4" />
+          <span>{retrying ? 'Reconnecting...' : 'Disconnected'}</span>
+          {!retrying && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onRetry}
+              className="ml-2 h-6 px-2 hover:bg-destructive/20"
+            >
+              <RefreshCw className="h-3 w-3 mr-1" />
+              Retry
+            </Button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -123,7 +154,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const [progressStage, setProgressStage] = useState<string>("");
   const [progressSubstage, setProgressSubstage] = useState<string>("");
   const [wsError, setWsError] = useState<Error | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsRetrying, setWsRetrying] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const retryTimeoutRef = useRef<NodeJS.Timeout>();
+  const pingIntervalRef = useRef<NodeJS.Timeout>();
   const { toast } = useToast();
   
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
@@ -159,20 +194,62 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, [subtitles, onTextUpdate]);
 
-  // WebSocket connection with error boundary
-  useEffect(() => {
-    if (!videoId) return;
+  const cleanupWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, "Cleanup");
+      wsRef.current = null;
+    }
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+    }
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+    }
+    setWsConnected(false);
+    setWsRetrying(false);
+  };
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const maxRetries = 3;
-    let retryCount = 0;
-    let retryTimeout: NodeJS.Timeout;
-    let pingInterval: NodeJS.Timeout;
+  const handleWebSocketError = (error: Event | Error) => {
+    console.error('WebSocket error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Connection error occurred';
+    setWsError(new Error(errorMessage));
+    setWsConnected(false);
+  };
+
+  const connectWebSocket = () => {
+    if (!videoId) return Promise.reject(new Error('No video ID provided'));
     
-    function connect() {
+    return new Promise<void>((resolve, reject) => {
       try {
+        cleanupWebSocket();
+        setWsRetrying(true);
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const ws = new WebSocket(`${protocol}//${window.location.host}/progress`);
         wsRef.current = ws;
+
+        const connectionTimeout = setTimeout(() => {
+          if (ws.readyState !== WebSocket.OPEN) {
+            ws.close();
+            reject(new Error('Connection timeout'));
+          }
+        }, 5000);
+
+        ws.onopen = () => {
+          clearTimeout(connectionTimeout);
+          setWsConnected(true);
+          setWsRetrying(false);
+          setWsError(null);
+          
+          // Setup ping interval
+          pingIntervalRef.current = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send('ping');
+            }
+          }, 30000);
+          
+          resolve();
+        };
 
         ws.onmessage = (event) => {
           try {
@@ -195,79 +272,67 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
-            setWsError(error as Error);
+            handleWebSocketError(error);
           }
         };
 
-        ws.onopen = () => {
-          console.log('WebSocket connected');
-          retryCount = 0;
-          setWsError(null);
-          
-          // Set up ping interval
-          pingInterval = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send('ping');
-            }
-          }, 30000);
-        };
-
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          setWsError(error as Error);
-        };
+        ws.onerror = handleWebSocketError;
 
         ws.onclose = (event) => {
+          clearTimeout(connectionTimeout);
           console.log('WebSocket closed:', event.code, event.reason);
-          clearInterval(pingInterval);
+          setWsConnected(false);
           
-          if (retryCount < maxRetries && event.code !== 1000) {
+          // Only retry if closure wasn't intentional
+          if (event.code !== 1000 && retryCount < 3) {
             const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
-            console.log(`Retrying connection in ${retryDelay}ms...`);
+            setWsRetrying(true);
             
-            retryTimeout = setTimeout(() => {
-              retryCount++;
-              connect();
+            retryTimeoutRef.current = setTimeout(() => {
+              setRetryCount(count => count + 1);
+              connectWebSocket().catch(reject);
             }, retryDelay);
-          } else if (retryCount >= maxRetries) {
+          } else if (retryCount >= 3) {
+            setWsRetrying(false);
             setWsError(new Error('Failed to maintain connection to the server'));
-            toast({
-              title: "Connection Error",
-              description: "Failed to maintain connection to the server. Please refresh the page.",
-              variant: "destructive"
-            });
+            reject(new Error('Maximum retry attempts reached'));
           }
         };
       } catch (error) {
         console.error('Error establishing WebSocket connection:', error);
-        setWsError(error as Error);
+        reject(error);
       }
-    }
+    });
+  };
 
-    connect();
+  // WebSocket connection effect
+  useEffect(() => {
+    if (!videoId) return;
 
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close(1000, "Component unmounting");
-        wsRef.current = null;
-      }
-      if (retryTimeout) {
-        clearTimeout(retryTimeout);
-      }
-      if (pingInterval) {
-        clearInterval(pingInterval);
-      }
-    };
-  }, [videoId, toast]);
+    connectWebSocket().catch((error) => {
+      console.error('Failed to establish WebSocket connection:', error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to connect to the progress tracking server. Please try refreshing the page.",
+        variant: "destructive"
+      });
+    });
+
+    return cleanupWebSocket;
+  }, [videoId, retryCount]);
 
   const handleRetry = () => {
-    setRetryCount(count => count + 1);
+    setRetryCount(0);
     setProgress(0);
     setProgressMessage("");
     setProgressStage("");
     setProgressSubstage("");
     setWsError(null);
     mutate(videoId ? `/api/subtitles/${videoId}` : null);
+    
+    if (!wsConnected) {
+      connectWebSocket().catch(console.error);
+    }
   };
 
   const getLanguageName = (code?: string) => {
@@ -295,6 +360,22 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   return (
     <ErrorBoundary onError={handleError}>
       <div className="p-6 animate-fade-in">
+        <div className="mb-4 flex items-center justify-between">
+          {subtitles?.[0]?.language && (
+            <div className="flex items-center gap-2">
+              <Globe className="h-5 w-5 text-primary" />
+              <Badge variant="secondary" className="bg-gradient-to-r from-primary/10 to-primary/5 text-primary px-3 py-1">
+                {getLanguageName(subtitles[0].language)}
+              </Badge>
+            </div>
+          )}
+          <ConnectionStatus
+            connected={wsConnected}
+            retrying={wsRetrying}
+            onRetry={handleRetry}
+          />
+        </div>
+
         {error || wsError ? (
           <div className="space-y-6">
             <Alert variant="destructive" className="mb-6 border-destructive/50 bg-destructive/10">
@@ -327,65 +408,54 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             </Button>
           </div>
         ) : (
-          <>
-            {subtitles?.[0]?.language && (
-              <div className="flex items-center gap-2 mb-4">
-                <Globe className="h-5 w-5 text-primary" />
-                <Badge variant="secondary" className="bg-gradient-to-r from-primary/10 to-primary/5 text-primary px-3 py-1">
-                  {getLanguageName(subtitles[0].language)}
-                </Badge>
+          <ScrollArea className="h-[500px]">
+            {isValidating ? (
+              <div className="space-y-6">
+                <div className="flex items-center gap-3 text-primary text-lg">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  {progressMessage || "Processing Audio..."}
+                </div>
+                <div className="relative">
+                  <Progress 
+                    value={progress} 
+                    className="h-2 bg-primary/20 transition-all duration-300"
+                  />
+                </div>
+                <Alert className="bg-muted/50 border-primary/20">
+                  <AlertTitle className="text-lg font-semibold mb-4">Processing Progress</AlertTitle>
+                  <AlertDescription className="text-base">
+                    <ProgressStages stage={progressStage} substage={progressSubstage} />
+                  </AlertDescription>
+                </Alert>
+              </div>
+            ) : subtitles ? (
+              <div className="prose prose-lg max-w-none dark:prose-invert">
+                {subtitles
+                  .reduce((acc, subtitle) => {
+                    const lastParagraph = acc[acc.length - 1] || [];
+                    if (lastParagraph.length < 5) {
+                      lastParagraph.push(subtitle.text);
+                      if (acc.length === 0) acc.push(lastParagraph);
+                    } else {
+                      acc.push([subtitle.text]);
+                    }
+                    return acc;
+                  }, [] as string[][])
+                  .map((paragraph, index) => (
+                    <p 
+                      key={index} 
+                      className="mb-6 leading-relaxed transition-colors duration-200 hover:text-primary/90 cursor-default"
+                    >
+                      {paragraph.join(' ')}
+                    </p>
+                  ))}
+              </div>
+            ) : (
+              <div className="text-center text-muted-foreground text-lg">
+                No content available
               </div>
             )}
-            
-            <ScrollArea className="h-[500px]">
-              {isValidating ? (
-                <div className="space-y-6">
-                  <div className="flex items-center gap-3 text-primary text-lg">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    {progressMessage || "Processing Audio..."}
-                  </div>
-                  <div className="relative">
-                    <Progress 
-                      value={progress} 
-                      className="h-2 bg-primary/20 transition-all duration-300"
-                    />
-                  </div>
-                  <Alert className="bg-muted/50 border-primary/20">
-                    <AlertTitle className="text-lg font-semibold mb-4">Processing Progress</AlertTitle>
-                    <AlertDescription className="text-base">
-                      <ProgressStages stage={progressStage} substage={progressSubstage} />
-                    </AlertDescription>
-                  </Alert>
-                </div>
-              ) : subtitles ? (
-                <div className="prose prose-lg max-w-none dark:prose-invert">
-                  {subtitles
-                    .reduce((acc, subtitle) => {
-                      const lastParagraph = acc[acc.length - 1] || [];
-                      if (lastParagraph.length < 5) {
-                        lastParagraph.push(subtitle.text);
-                        if (acc.length === 0) acc.push(lastParagraph);
-                      } else {
-                        acc.push([subtitle.text]);
-                      }
-                      return acc;
-                    }, [] as string[][])
-                    .map((paragraph, index) => (
-                      <p 
-                        key={index} 
-                        className="mb-6 leading-relaxed transition-colors duration-200 hover:text-primary/90 cursor-default"
-                      >
-                        {paragraph.join(' ')}
-                      </p>
-                    ))}
-                </div>
-              ) : (
-                <div className="text-center text-muted-foreground text-lg">
-                  No content available
-                </div>
-              )}
-            </ScrollArea>
-          </>
+          </ScrollArea>
         )}
       </div>
     </ErrorBoundary>
