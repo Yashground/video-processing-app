@@ -3,6 +3,7 @@ import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import useSWR from "swr";
 import { useToast } from "@/hooks/use-toast";
+import { Loader2 } from "lucide-react";
 
 interface Subtitle {
   start: number;
@@ -18,13 +19,13 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
   const [selectedSubtitle, setSelectedSubtitle] = useState<Subtitle | null>(null);
   const { toast } = useToast();
   
-  const { data: subtitles, error } = useSWR<Subtitle[]>(
+  const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
     videoId ? `/api/subtitles/${videoId}` : null,
     {
       onError: (err) => {
         toast({
           title: "Error",
-          description: "Failed to load subtitles. Please make sure the video has closed captions available.",
+          description: "Failed to process video audio. Please try again.",
           variant: "destructive"
         });
       }
@@ -51,7 +52,12 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
     <Card className="h-full p-4">
       <ScrollArea className="h-full">
         <div className="space-y-2">
-          {subtitles ? (
+          {isValidating && !subtitles ? (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Processing video audio...
+            </div>
+          ) : subtitles ? (
             subtitles.map((subtitle, index) => (
               <div
                 key={index}
@@ -67,7 +73,7 @@ export default function SubtitleViewer({ videoId }: SubtitleViewerProps) {
               </div>
             ))
           ) : (
-            <div className="text-muted-foreground">Loading subtitles...</div>
+            <div className="text-muted-foreground">No subtitles available</div>
           )}
         </div>
       </ScrollArea>

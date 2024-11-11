@@ -20,7 +20,10 @@ export default function Home() {
   const [videoId, setVideoId] = useState<string | null>(null);
   const { toast } = useToast();
   const form = useForm<z.infer<typeof urlSchema>>({
-    resolver: zodResolver(urlSchema)
+    resolver: zodResolver(urlSchema),
+    defaultValues: {
+      videoUrl: ""
+    }
   });
 
   const onSubmit = (data: z.infer<typeof urlSchema>) => {
