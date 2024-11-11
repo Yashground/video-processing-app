@@ -3,12 +3,15 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic } from "./vite";
 import { createServer } from "http";
 import { progressTracker } from "./lib/progress";
+import { setupAuth } from "./auth";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 (async () => {
+  // Set up authentication before registering other routes
+  setupAuth(app);
   registerRoutes(app);
   const server = createServer(app);
   
