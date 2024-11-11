@@ -1,11 +1,11 @@
 import { OpenAI } from 'openai';
 import { createWriteStream, createReadStream } from 'fs';
-import { unlink, stat, mkdir } from 'fs/promises';
+import { unlink, stat, mkdir, access, constants } from 'fs/promises';
 import { join, basename } from 'path';
 import youtubeDl from 'youtube-dl-exec';
 import ffmpeg from 'fluent-ffmpeg';
 import { promisify } from 'util';
-import { PassThrough, Transform } from 'stream';
+import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 
 const openai = new OpenAI({
@@ -18,8 +18,8 @@ const CHUNK_DURATION = 300; // 5 minutes in seconds for faster parallel processi
 const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
-const PARALLEL_LIMIT = 4; // Increased parallel processing limit
-const CACHE_SIZE = 10; // Number of segments to cache
+const PARALLEL_LIMIT = 4;
+const CACHE_SIZE = 10;
 const BUFFER_SIZE = 1024 * 1024; // 1MB buffer size for streaming
 
 // Simple in-memory LRU cache for processed segments
@@ -46,7 +46,9 @@ class SegmentCache {
     if (this.cache.size >= this.maxSize) {
       // Remove oldest entry
       const firstKey = this.cache.keys().next().value;
-      this.cache.delete(firstKey);
+      if (firstKey) {
+        this.cache.delete(firstKey);
+      }
     }
     this.cache.set(key, value);
   }
@@ -86,84 +88,116 @@ async function withRetry<T>(
 // Clean up function to handle file deletion
 async function cleanupFile(filePath: string): Promise<void> {
   try {
+    await access(filePath, constants.F_OK);
     await unlink(filePath);
   } catch (error) {
-    console.warn(`Failed to cleanup file ${filePath}:`, error);
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn(`Failed to cleanup file ${filePath}:`, error);
+    }
   }
 }
 
-// Audio compression transform stream
-class AudioCompressor extends Transform {
-  private ffmpeg: any;
-  private passThrough: PassThrough;
-
-  constructor() {
-    super();
-    this.passThrough = new PassThrough();
-    this.ffmpeg = ffmpeg()
-      .input(this.passThrough)
-      .audioQuality(0)
-      .audioBitrate('128k')
-      .format('m4a')
-      .on('error', (err) => this.emit('error', err));
+// Ensure temp directory exists and is writable
+async function ensureTempDir(dir: string): Promise<void> {
+  try {
+    await access(dir, constants.W_OK);
+  } catch (error) {
+    await mkdir(dir, { recursive: true, mode: 0o755 });
+    // Verify directory was created successfully
+    await access(dir, constants.W_OK);
   }
+}
 
-  _transform(chunk: Buffer, encoding: string, callback: Function) {
-    this.passThrough.write(chunk, encoding);
-    callback();
-  }
-
-  _flush(callback: Function) {
-    this.passThrough.end();
-    this.ffmpeg.pipe(this as any);
-    callback();
-  }
+// Create ffmpeg command for audio compression
+function createFfmpegCommand(outputPath: string) {
+  return ffmpeg()
+    .audioQuality(0)
+    .audioBitrate('128k')
+    .format('m4a')
+    .on('start', (commandLine) => {
+      console.log('FFmpeg process started:', commandLine);
+    })
+    .on('progress', (progress) => {
+      console.log('FFmpeg processing:', progress.percent?.toFixed(1) + '%');
+    })
+    .on('end', () => {
+      console.log('FFmpeg processing finished');
+    })
+    .on('error', (err) => {
+      console.error('FFmpeg processing error:', err);
+    });
 }
 
 export async function downloadAudio(videoId: string, maxLength?: number): Promise<string> {
   const tempDir = join(process.cwd(), 'temp');
-  await mkdir(tempDir, { recursive: true });
+  await ensureTempDir(tempDir);
   
   const audioPath = join(tempDir, `${videoId}.m4a`);
   const compressedPath = join(tempDir, `${videoId}_compressed.m4a`);
   
   try {
-    await cleanupFile(audioPath);
-    await cleanupFile(compressedPath);
+    // Clean up any existing files
+    await Promise.all([
+      cleanupFile(audioPath),
+      cleanupFile(compressedPath)
+    ]);
     
-    console.log(`[1/3] Downloading and processing audio for video ${videoId}`);
+    console.log(`[1/4] Starting download for video ${videoId}`);
     
-    const downloadProcess = youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
-      extractAudio: true,
-      audioFormat: 'm4a',
-      audioQuality: 7,
-      output: '-',
-      maxFilesize: '100M',
-      matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
-      noWarnings: true,
-      addHeader: [
-        'referer:youtube.com',
-        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
-      ]
+    // Download with retry mechanism
+    const downloadProcess = await withRetry(async () => {
+      return youtubeDl.exec(`https://www.youtube.com/watch?v=${videoId}`, {
+        extractAudio: true,
+        audioFormat: 'm4a',
+        audioQuality: 7,
+        output: audioPath,
+        maxFilesize: '100M',
+        matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
+        noWarnings: true,
+        addHeader: [
+          'referer:youtube.com',
+          'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
+        ]
+      });
     });
 
-    const compressor = new AudioCompressor();
-    const outputStream = createWriteStream(compressedPath);
+    console.log('[2/4] Audio download completed');
 
-    await pipeline(
-      downloadProcess.stdout!,
-      compressor,
-      outputStream
-    );
+    // Verify downloaded file exists and has content
+    const downloadedStats = await stat(audioPath);
+    if (downloadedStats.size === 0) {
+      throw new Error('Downloaded file is empty');
+    }
 
-    const stats = await stat(compressedPath);
-    console.log(`[2/3] Successfully processed audio: ${stats.size} bytes`);
+    console.log(`[3/4] Compressing audio file (${downloadedStats.size} bytes)`);
+
+    // Compress audio with proper error handling
+    await new Promise<void>((resolve, reject) => {
+      const command = createFfmpegCommand(compressedPath);
+      command
+        .input(audioPath)
+        .output(compressedPath)
+        .on('end', () => resolve())
+        .on('error', (err) => reject(err))
+        .run();
+    });
+
+    // Verify compressed file
+    const compressedStats = await stat(compressedPath);
+    console.log(`[4/4] Audio compression complete (${compressedStats.size} bytes)`);
+
+    // Clean up original file
+    await cleanupFile(audioPath);
     
     return compressedPath;
   } catch (error: any) {
+    // Ensure cleanup happens in case of error
+    await Promise.all([
+      cleanupFile(audioPath),
+      cleanupFile(compressedPath)
+    ]);
+    
     console.error('Error downloading audio:', error);
-    await cleanupFile(audioPath);
-    await cleanupFile(compressedPath);
     
     if (error.stderr?.includes('Video unavailable')) {
       throw new Error('Video is unavailable or private');
@@ -184,7 +218,7 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
 async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
   const segments: AudioSegment[] = [];
   const tempDir = join(process.cwd(), 'temp');
-  await mkdir(tempDir, { recursive: true });
+  await ensureTempDir(tempDir);
   
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(audioPath, async (err, metadata) => {
@@ -207,8 +241,8 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
             ffmpeg(audioPath)
               .setStartTime(startTime)
               .setDuration(Math.min(CHUNK_DURATION, duration - startTime))
-              .audioQuality(0) // Highest quality compression
-              .audioBitrate('128k') // Reduced bitrate
+              .audioQuality(0)
+              .audioBitrate('128k')
               .output(segmentPath)
               .on('end', () => res())
               .on('error', (err) => {
