@@ -14,7 +14,7 @@ export default {
         background: 'hsl(var(--background))',
         foreground: 'hsl(var(--foreground))',
         pastel: {
-          blue: '#E6F3FF',
+          blue: '#90CDF4',  // Changed from '#E6F3FF' to a more vibrant blue
           pink: '#FFE6E6',
           purple: '#F3E6FF',
           mint: '#E6FFF3'

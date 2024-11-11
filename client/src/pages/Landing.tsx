@@ -74,7 +74,17 @@ export function Landing() {
       <FloatingShapes />
       <div className="container relative mx-auto px-4 py-16 z-10">
         <div className="flex flex-col items-center gap-8">
-          <h1 className="text-5xl font-bold bg-gradient-to-r from-primary to-pastel-purple bg-clip-text text-transparent animate-fade-in-up">
+          <h1 className="text-5xl font-bold bg-gradient-to-r from-primary to-pastel-purple bg-clip-text text-transparent animate-fade-in-up flex items-center gap-3">
+            <svg
+              viewBox="0 0 24 24"
+              className="w-12 h-12 text-primary animate-float"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <path d="M12 6v6l4 2" />
+            </svg>
             Watch Hour
           </h1>
           <p className="text-xl text-center max-w-2xl text-muted-foreground animate-fade-in-up" style={{ animationDelay: '0.2s' }}>
