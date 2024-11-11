@@ -100,7 +100,49 @@ export function registerRoutes(app: Express) {
     }
   });
 
-  // Add new clear history endpoint
+  // Add new export endpoint
+  app.get("/api/videos/export", async (req, res) => {
+    try {
+      const allVideos = await db
+        .select()
+        .from(subtitles)
+        .orderBy(desc(subtitles.createdAt));
+
+      // Group subtitles by video
+      const videoMap = allVideos.reduce((acc, subtitle) => {
+        if (!acc[subtitle.videoId]) {
+          acc[subtitle.videoId] = {
+            videoId: subtitle.videoId,
+            title: subtitle.title,
+            createdAt: subtitle.createdAt,
+            language: subtitle.language,
+            subtitles: []
+          };
+        }
+        acc[subtitle.videoId].subtitles.push({
+          start: subtitle.start,
+          end: subtitle.end,
+          text: subtitle.text
+        });
+        return acc;
+      }, {} as Record<string, any>);
+
+      const exportData = {
+        exportDate: new Date().toISOString(),
+        videos: Object.values(videoMap)
+      };
+
+      // Set headers for file download
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Disposition', 'attachment; filename=video-history-export.json');
+      
+      res.json(exportData);
+    } catch (error) {
+      console.error("Error exporting history:", error);
+      res.status(500).json({ error: "Failed to export history" });
+    }
+  });
+
   app.delete("/api/videos", async (req, res) => {
     try {
       await db.delete(subtitles);
@@ -111,7 +153,6 @@ export function registerRoutes(app: Express) {
     }
   });
 
-  // Add new endpoint for deleting individual videos
   app.delete("/api/videos/:videoId", async (req, res) => {
     try {
       const videoId = req.params.videoId;
