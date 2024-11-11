@@ -28,20 +28,37 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
     // Clean up any existing file
     await unlink(outputPath).catch(() => {});
     
-    await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
-      extractAudio: true,
-      audioFormat: 'mp3',
-      audioQuality: 0,
-      output: outputPath,
-      maxFilesize: '25M',
-      matchFilter: maxLength ? `duration <= ${maxLength}` : undefined,
-      postprocessorArgs: ['-b:a', '64k'],
-      noWarnings: true,
-      noCallHome: true,
-    });
-
-    // Verify file exists and is accessible
-    await stat(outputPath);
+    let attempts = 3;
+    while (attempts > 0) {
+      try {
+        console.log(`Attempting to download audio for video ${videoId} (attempt ${4 - attempts}/3)`);
+        
+        await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
+          extractAudio: true,
+          audioFormat: 'mp3',
+          audioQuality: 0,
+          output: outputPath,
+          maxFilesize: '25M',
+          matchFilter: maxLength ? `duration <= ${maxLength}` : undefined,
+          noWarnings: true,
+          noCallHome: true,
+          addHeader: [
+            'referer:youtube.com',
+            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36'
+          ]
+        });
+        
+        // Verify file exists and is accessible
+        const fileStats = await stat(outputPath);
+        console.log(`Successfully downloaded audio: ${fileStats.size} bytes`);
+        break;
+      } catch (error) {
+        attempts--;
+        console.error(`Download attempt failed (${attempts} attempts remaining):`, error);
+        if (attempts === 0) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
     
     return outputPath;
   } catch (error: any) {
@@ -56,6 +73,8 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
       throw new Error('Video file is too large');
     } else if (error.stderr?.includes('duration')) {
       throw new Error('Video duration exceeds the maximum limit');
+    } else if (error.stderr?.includes('copyright')) {
+      throw new Error('Video is not accessible due to copyright restrictions');
     } else if (error.code === 'ENOENT') {
       throw new Error('Failed to save audio file');
     }

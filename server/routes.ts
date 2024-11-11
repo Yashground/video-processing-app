@@ -25,6 +25,8 @@ export function registerRoutes(app: Express) {
     const videoId = req.params.videoId;
     let audioPath: string | null = null;
     
+    console.log(`Processing subtitle request for video: ${videoId}`);
+    
     try {
       // First check if subtitles exist in database
       const existingSubtitles = await db.select()
@@ -33,16 +35,21 @@ export function registerRoutes(app: Express) {
         .orderBy(subtitles.start);
 
       if (existingSubtitles.length > 0) {
+        console.log(`Found existing subtitles for video ${videoId}`);
         return res.json(existingSubtitles);
       }
+
+      console.log(`No existing subtitles found for ${videoId}, processing audio...`);
 
       // If not in database, process audio and generate subtitles
       try {
         // Download audio with max duration limit
         audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
+        console.log(`Successfully downloaded audio to ${audioPath}`);
         
         // Generate transcription using Whisper
         const subtitleData = await transcribeAudio(audioPath);
+        console.log(`Successfully generated transcription with ${subtitleData.length} segments`);
         
         // Add videoId to each subtitle
         const subtitlesWithVideoId = subtitleData.map(sub => ({
@@ -52,6 +59,7 @@ export function registerRoutes(app: Express) {
 
         // Save to database
         await db.insert(subtitles).values(subtitlesWithVideoId);
+        console.log(`Successfully saved subtitles to database`);
 
         // Return the subtitles
         res.json(subtitlesWithVideoId);
@@ -78,11 +86,16 @@ export function registerRoutes(app: Express) {
           res.status(400).json({ 
             error: "Video is unavailable or private. Please try another video." 
           });
+        } else if (error.message?.includes("copyright")) {
+          res.status(403).json({ 
+            error: "Video is not accessible due to copyright restrictions." 
+          });
         } else if (error.code === 'ENOENT') {
           res.status(500).json({ 
             error: "Failed to process audio file. Please try again." 
           });
         } else {
+          console.error("Unexpected error details:", error);
           res.status(500).json({ 
             error: "Failed to process audio. Please try again." 
           });
