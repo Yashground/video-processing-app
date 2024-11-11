@@ -3,20 +3,37 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, AlertCircle } from "lucide-react";
+import { Loader2, AlertCircle, Globe } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
+import { Badge } from "@/components/ui/badge";
 
 interface Subtitle {
   start: number;
   end: number;
   text: string;
+  language?: string;
 }
 
 interface SubtitleViewerProps {
   videoId: string | null;
   onTextUpdate?: (text: string) => void;
 }
+
+const languageNames: { [key: string]: string } = {
+  en: "English",
+  de: "German",
+  es: "Spanish",
+  fr: "French",
+  it: "Italian",
+  pt: "Portuguese",
+  nl: "Dutch",
+  pl: "Polish",
+  ru: "Russian",
+  ja: "Japanese",
+  ko: "Korean",
+  zh: "Chinese"
+};
 
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
@@ -29,9 +46,9 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       onError: (err) => {
         let errorMessage = "Failed to process audio.";
         if (err.message?.includes("too large") || err.message?.includes("maxFilesize")) {
-          errorMessage = "Audio file is too large. Please try a shorter video.";
+          errorMessage = "Audio file is too large (max 100MB). Please try a shorter video.";
         } else if (err.message?.includes("duration") || err.message?.includes("maximum limit")) {
-          errorMessage = "Video is too long. Please try a shorter video (max 30 minutes).";
+          errorMessage = "Video is too long. Maximum supported duration is 2 hours.";
         } else if (err.message?.includes("unavailable") || err.message?.includes("private")) {
           errorMessage = "Video is unavailable or private. Please try another video.";
         }
@@ -56,15 +73,25 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, [subtitles, onTextUpdate]);
 
-  // Simulate progress during processing
+  // Simulate progress during processing with more stages for longer videos
   useEffect(() => {
     if (isValidating) {
+      const stages = [
+        { threshold: 20, speed: 800 },
+        { threshold: 40, speed: 1000 },
+        { threshold: 60, speed: 1200 },
+        { threshold: 80, speed: 1500 },
+        { threshold: 95, speed: 2000 }
+      ];
+
       const interval = setInterval(() => {
         setProgress(p => {
-          if (p >= 90) return p;
-          return p + 1;
+          const stage = stages.find(s => p < s.threshold);
+          if (!stage || p >= 95) return p;
+          return p + (100 - p) / stage.speed * 10;
         });
-      }, 500);
+      }, 100);
+      
       return () => clearInterval(interval);
     } else {
       setProgress(0);
@@ -75,6 +102,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     setRetryCount(count => count + 1);
     setProgress(0);
     mutate(videoId ? `/api/subtitles/${videoId}` : null);
+  };
+
+  const getLanguageName = (code?: string) => {
+    if (!code) return "Unknown";
+    return languageNames[code.toLowerCase()] || code;
   };
 
   if (!videoId) {
@@ -94,7 +126,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           <AlertDescription className="mt-2 text-base">
             We couldn't process the audio because:
             <ul className="list-disc list-inside mt-3 space-y-1">
-              <li>The video might be too long (max 30 minutes)</li>
+              <li>The video might be too long (max 2 hours)</li>
+              <li>The file might be too large (max 100MB)</li>
               <li>The video might be private or unavailable</li>
               <li>There might be an issue with the audio extraction</li>
             </ul>
@@ -109,6 +142,15 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   return (
     <div className="p-6">
+      {subtitles?.[0]?.language && (
+        <div className="flex items-center gap-2 mb-4">
+          <Globe className="h-4 w-4" />
+          <Badge variant="secondary">
+            {getLanguageName(subtitles[0].language)}
+          </Badge>
+        </div>
+      )}
+      
       <ScrollArea className="h-[500px]">
         {isValidating ? (
           <div className="space-y-6">
@@ -122,15 +164,20 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               <AlertDescription className="text-base space-y-4">
                 <ul className="list-disc list-inside space-y-2">
                   <li className={progress > 30 ? "text-muted-foreground" : ""}>
-                    Downloading the audio from YouTube
+                    Downloading audio from YouTube
                   </li>
-                  <li className={progress > 60 ? "text-muted-foreground" : ""}>
-                    Converting audio format
+                  <li className={progress > 50 ? "text-muted-foreground" : ""}>
+                    Preparing audio for processing
                   </li>
-                  <li>Generating transcription using AI</li>
+                  <li className={progress > 70 ? "text-muted-foreground" : ""}>
+                    Detecting language and transcribing
+                  </li>
+                  <li>
+                    Generating final transcription
+                  </li>
                 </ul>
                 <p className="text-sm text-muted-foreground mt-4">
-                  This might take a few minutes depending on the video length.
+                  This process might take several minutes for longer videos.
                 </p>
               </AlertDescription>
             </Alert>

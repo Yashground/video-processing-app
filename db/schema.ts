@@ -8,6 +8,7 @@ export const subtitles = pgTable("subtitles", {
   start: integer("start").notNull(),
   end: integer("end").notNull(),
   text: text("text").notNull(),
+  language: text("language"),
   createdAt: timestamp("created_at").defaultNow()
 });
 

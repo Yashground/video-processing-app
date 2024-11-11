@@ -11,11 +11,19 @@ const openai = new OpenAI({
 });
 
 const MAX_CHUNK_SIZE = 24 * 1024 * 1024; // 24MB
-const CHUNK_DURATION = 600; // 10 minutes in seconds
+const CHUNK_DURATION = 1800; // 30 minutes in seconds
+const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 
 interface AudioSegment {
   path: string;
   startTime: number;
+}
+
+interface TranscriptionResult {
+  start: number;
+  end: number;
+  text: string;
+  language?: string;
 }
 
 export async function downloadAudio(videoId: string, maxLength?: number): Promise<string> {
@@ -38,8 +46,8 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
           audioFormat: 'm4a',
           audioQuality: 0,
           output: audioPath,
-          maxFilesize: '25M',
-          matchFilter: maxLength ? `duration <= ${maxLength}` : undefined,
+          maxFilesize: '100M', // Increased for longer videos
+          matchFilter: maxLength ? `duration <= ${maxLength}` : `duration <= ${MAX_VIDEO_DURATION}`,
           noWarnings: true,
           addHeader: [
             'referer:youtube.com',
@@ -73,9 +81,9 @@ export async function downloadAudio(videoId: string, maxLength?: number): Promis
     if (error.stderr?.includes('Video unavailable')) {
       throw new Error('Video is unavailable or private');
     } else if (error.stderr?.includes('maxFilesize')) {
-      throw new Error('Video file is too large');
+      throw new Error('Video file is too large (max 100MB)');
     } else if (error.stderr?.includes('duration')) {
-      throw new Error('Video duration exceeds the maximum limit');
+      throw new Error(`Video duration exceeds the maximum limit of ${MAX_VIDEO_DURATION / 3600} hours`);
     } else if (error.stderr?.includes('copyright')) {
       throw new Error('Video is not accessible due to copyright restrictions');
     } else if (error.code === 'ENOENT') {
@@ -114,7 +122,7 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
           await new Promise<void>((res, rej) => {
             ffmpeg(audioPath)
               .setStartTime(startTime)
-              .setDuration(CHUNK_DURATION)
+              .setDuration(Math.min(CHUNK_DURATION, duration - startTime))
               .output(segmentPath)
               .on('end', () => res())
               .on('error', (err) => {
@@ -140,30 +148,40 @@ async function splitAudio(audioPath: string): Promise<AudioSegment[]> {
   });
 }
 
-export async function transcribeAudio(audioPath: string): Promise<Array<{start: number, end: number, text: string}>> {
+export async function transcribeAudio(audioPath: string): Promise<TranscriptionResult[]> {
   try {
     // Verify input file exists
     const stats = await stat(audioPath);
     const fileSize = stats.size;
     
+    let transcriptionLanguage: string | undefined;
+    
     if (fileSize > MAX_CHUNK_SIZE) {
       // Split audio into chunks and process each chunk
       const segments = await splitAudio(audioPath);
-      let allSubtitles: Array<{start: number, end: number, text: string}> = [];
+      let allSubtitles: TranscriptionResult[] = [];
       
       for (const segment of segments) {
         try {
           const transcription = await openai.audio.transcriptions.create({
             file: createReadStream(segment.path),
             model: "whisper-1",
-            response_format: "verbose_json"
+            response_format: "verbose_json",
+            language: transcriptionLanguage // Use detected language for consistency
           });
+          
+          // Detect language from first segment if not already detected
+          if (!transcriptionLanguage && transcription.language) {
+            transcriptionLanguage = transcription.language;
+            console.log(`Detected language: ${transcriptionLanguage}`);
+          }
           
           if (transcription.segments) {
             const subtitles = transcription.segments.map(seg => ({
               start: Math.floor(seg.start * 1000) + segment.startTime,
               end: Math.floor(seg.end * 1000) + segment.startTime,
-              text: seg.text.trim()
+              text: seg.text.trim(),
+              language: transcriptionLanguage
             }));
             
             allSubtitles = [...allSubtitles, ...subtitles];
@@ -200,10 +218,14 @@ export async function transcribeAudio(audioPath: string): Promise<Array<{start: 
         throw new Error('No transcription segments found');
       }
       
+      transcriptionLanguage = transcription.language;
+      console.log(`Detected language: ${transcriptionLanguage}`);
+      
       return transcription.segments.map(segment => ({
         start: Math.floor(segment.start * 1000),
         end: Math.floor(segment.end * 1000),
-        text: segment.text.trim()
+        text: segment.text.trim(),
+        language: transcriptionLanguage
       }));
     }
   } catch (error) {

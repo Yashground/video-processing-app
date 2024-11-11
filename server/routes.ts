@@ -24,7 +24,7 @@ mkdir(tempDir, { recursive: true }).catch(err => {
   console.error('Error creating temp directory:', err);
 });
 
-const MAX_VIDEO_DURATION = 1800; // 30 minutes in seconds
+const MAX_VIDEO_DURATION = 7200; // 2 hours in seconds
 
 export function registerRoutes(app: Express) {
   app.post("/api/summarize", async (req, res) => {
@@ -84,7 +84,7 @@ export function registerRoutes(app: Express) {
         
         // Generate transcription using Whisper
         const subtitleData = await transcribeAudio(audioPath);
-        console.log(`Successfully generated transcription with ${subtitleData.length} segments`);
+        console.log(`Successfully generated transcription with ${subtitleData.length} segments in ${subtitleData[0]?.language || 'unknown'} language`);
         
         // Add videoId to each subtitle
         const subtitlesWithVideoId = subtitleData.map(sub => ({
@@ -108,14 +108,14 @@ export function registerRoutes(app: Express) {
           });
         }
         
-        // Handle specific error cases
+        // Handle specific error cases with improved messages
         if (error.message?.includes("too large") || error.message?.includes("maxFilesize")) {
           res.status(413).json({ 
-            error: "Video file is too large. Please try a shorter video." 
+            error: "Video file is too large (max 100MB). Please try a shorter video." 
           });
         } else if (error.message?.includes("duration") || error.message?.includes("maximum limit")) {
           res.status(413).json({ 
-            error: "Video is too long. Please try a shorter video (max 30 minutes)." 
+            error: `Video is too long. Maximum supported duration is ${MAX_VIDEO_DURATION / 3600} hours.` 
           });
         } else if (error.message?.includes("unavailable") || error.message?.includes("private")) {
           res.status(400).json({ 
