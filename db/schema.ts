@@ -13,14 +13,14 @@ export const subtitles = pgTable("subtitles", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   videoId: text("video_id").notNull(),
   start: integer("start").notNull(),
-  end: integer("end").notNull(),
+  end: integer("end_time").notNull(), // Changed from 'end' to 'end_time'
   text: text("text").notNull(),
   language: text("language"),
   title: text("title"),
   thumbnailUrl: text("thumbnail_url"),
   timeSaved: real("time_saved"),
   createdAt: timestamp("created_at").defaultNow(),
-  userId: integer("user_id").references(() => users.id)
+  userId: integer("user_id").references(() => users.id).notNull()
 });
 
 export const insertUserSchema = createInsertSchema(users);
