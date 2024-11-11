@@ -1,13 +1,22 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useUser } from "@/hooks/use-user";
 import { Button } from "@/components/ui/button";
+import { useLocation } from "wouter";
 
 export function Landing() {
-  const { login, register } = useUser();
+  const { login, register, user, isLoading } = useUser();
   const [isLogin, setIsLogin] = useState(true);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [, setLocation] = useLocation();
+
+  // Redirect to /home if user is already authenticated
+  useEffect(() => {
+    if (user && !isLoading) {
+      setLocation("/home");
+    }
+  }, [user, isLoading, setLocation]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -16,8 +25,24 @@ export function Landing() {
     const result = await (isLogin ? login : register)({ username, password });
     if (!result.ok) {
       setError(result.message);
+    } else {
+      setLocation("/home");
     }
   };
+
+  // Show loading state while checking authentication
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="animate-pulse">Loading...</div>
+      </div>
+    );
+  }
+
+  // Don't render the landing page if user is authenticated
+  if (user) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-background">
