@@ -61,7 +61,6 @@ async function getVideoMetadata(videoId: string) {
 }
 
 export function registerRoutes(app: Express) {
-  // Existing routes...
   app.get("/api/videos", async (req, res) => {
     try {
       const videos = await db
@@ -160,6 +159,9 @@ export function registerRoutes(app: Express) {
         return res.json(existingSubtitles);
       }
 
+      // Get video metadata before processing
+      const metadata = await getVideoMetadata(videoId);
+
       // Process audio and generate subtitles
       try {
         audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
@@ -187,7 +189,6 @@ export function registerRoutes(app: Express) {
     }
   });
 
-  // New translation endpoint
   app.post("/api/translate", async (req, res) => {
     try {
       const { text, targetLanguage } = z.object({
