@@ -11,7 +11,8 @@ import SummaryPanel from "../components/SummaryPanel";
 import TranslationPanel from "../components/TranslationPanel";
 import HistorySidebar from "../components/HistorySidebar";
 import { useToast } from "@/hooks/use-toast";
-import { Youtube } from "lucide-react";
+import { Youtube, LogOut } from "lucide-react";
+import { useUser } from "@/hooks/use-user";
 
 const urlSchema = z.object({
   videoUrl: z.string().url().refine((url) => {
@@ -34,6 +35,7 @@ export default function Home() {
   const [videoId, setVideoId] = useState<string | null>(null);
   const [transcribedText, setTranscribedText] = useState<string>("");
   const { toast } = useToast();
+  const { user, logout } = useUser();
   
   const form = useForm<z.infer<typeof urlSchema>>({
     resolver: zodResolver(urlSchema),
@@ -80,7 +82,26 @@ export default function Home() {
         className="hidden md:block"
       />
       <div className="flex-1 overflow-auto">
-        <div className="container py-12 px-4 space-y-8 animate-fade-in">
+        <div className="container py-6 px-4 space-y-8 animate-fade-in">
+          {/* User Profile Section */}
+          <div className="flex justify-end items-center gap-4">
+            <span className="text-sm text-muted-foreground">
+              Welcome, {user?.username}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                logout();
+                // Will automatically redirect to landing page due to auth check
+              }}
+              className="flex items-center gap-2 hover:bg-destructive/10 hover:text-destructive"
+            >
+              <LogOut className="h-4 w-4" />
+              Logout
+            </Button>
+          </div>
+
           <Card className="p-8 shadow-lg bg-gradient-to-br from-background via-background to-muted transition-all duration-300 hover:shadow-xl">
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-4">
