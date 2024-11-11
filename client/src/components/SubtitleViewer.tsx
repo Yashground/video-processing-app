@@ -89,38 +89,76 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     if (!videoId) return;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/progress`);
-    wsRef.current = ws;
+    const maxRetries = 3;
+    let retryCount = 0;
+    let retryTimeout: NodeJS.Timeout;
+    
+    function connect() {
+      const ws = new WebSocket(`${protocol}//${window.location.host}/progress`);
+      wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const update: ProgressUpdate = JSON.parse(event.data);
-        if (update.videoId === videoId) {
-          if (update.error) {
-            toast({
-              title: "Processing Error",
-              description: update.error,
-              variant: "destructive"
-            });
-          } else {
-            setProgress(update.progress);
-            setProgressMessage(update.message || "");
-            setProgressStage(update.stage);
+      ws.onmessage = (event) => {
+        try {
+          const update: ProgressUpdate = JSON.parse(event.data);
+          if (update.videoId === videoId) {
+            if (update.error) {
+              toast({
+                title: "Processing Error",
+                description: update.error,
+                variant: "destructive"
+              });
+            } else {
+              setProgress(update.progress);
+              setProgressMessage(update.message || "");
+              setProgressStage(update.stage);
+            }
           }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
         }
-      } catch (error) {
-        console.error('Error parsing WebSocket message:', error);
-      }
-    };
+      };
 
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
+      ws.onopen = () => {
+        console.log('WebSocket connected');
+        retryCount = 0; // Reset retry count on successful connection
+      };
 
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onclose = (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
+        
+        // Only retry if we haven't reached max retries and the closure wasn't intentional
+        if (retryCount < maxRetries && event.code !== 1000) {
+          const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
+          console.log(`Retrying connection in ${retryDelay}ms...`);
+          
+          retryTimeout = setTimeout(() => {
+            retryCount++;
+            connect();
+          }, retryDelay);
+        } else if (retryCount >= maxRetries) {
+          toast({
+            title: "Connection Error",
+            description: "Failed to maintain connection to the server. Please refresh the page.",
+            variant: "destructive"
+          });
+        }
+      };
+    }
+
+    connect();
+
+    // Cleanup function
     return () => {
       if (wsRef.current) {
-        wsRef.current.close();
+        wsRef.current.close(1000, "Component unmounting");
         wsRef.current = null;
+      }
+      if (retryTimeout) {
+        clearTimeout(retryTimeout);
       }
     };
   }, [videoId, toast]);

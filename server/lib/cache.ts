@@ -1,5 +1,5 @@
 import { join } from 'path';
-import { writeFile, readFile, unlink, readdir } from 'fs/promises';
+import { writeFile, readFile, unlink, readdir, mkdir, access, constants } from 'fs/promises';
 import { TranscriptionResult } from './types';
 
 const CACHE_DIR = join(process.cwd(), 'cache');
@@ -16,6 +16,7 @@ interface CacheMetadata {
 export class VideoCache {
   private static instance: VideoCache;
   private metadata: Map<string, CacheMetadata>;
+  private initialized: boolean = false;
 
   private constructor() {
     this.metadata = new Map();
@@ -29,9 +30,23 @@ export class VideoCache {
     return VideoCache.instance;
   }
 
-  private async initializeCache() {
+  private async ensureDirectory() {
     try {
-      await mkdir(CACHE_DIR, { recursive: true });
+      await access(CACHE_DIR, constants.F_OK);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        await mkdir(CACHE_DIR, { recursive: true });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  private async initializeCache() {
+    if (this.initialized) return;
+    
+    try {
+      await this.ensureDirectory();
       const files = await readdir(CACHE_DIR);
       
       for (const file of files) {
@@ -49,8 +64,10 @@ export class VideoCache {
       }
 
       await this.cleanCache();
+      this.initialized = true;
     } catch (error) {
       console.error('Error initializing cache:', error);
+      throw new Error(`Cache initialization failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -73,10 +90,11 @@ export class VideoCache {
   }
 
   async getCached(videoId: string): Promise<TranscriptionResult[] | null> {
-    const metadata = this.metadata.get(videoId);
-    if (!metadata) return null;
-
     try {
+      await this.initializeCache();
+      const metadata = this.metadata.get(videoId);
+      if (!metadata) return null;
+
       const cachePath = join(CACHE_DIR, `${videoId}.json`);
       const data = await readFile(cachePath, 'utf-8');
       
@@ -93,10 +111,13 @@ export class VideoCache {
   }
 
   async setCached(videoId: string, data: TranscriptionResult[]): Promise<void> {
-    const jsonData = JSON.stringify(data);
-    const cachePath = join(CACHE_DIR, `${videoId}.json`);
-    
     try {
+      await this.initializeCache();
+      await this.ensureDirectory();
+
+      const jsonData = JSON.stringify(data);
+      const cachePath = join(CACHE_DIR, `${videoId}.json`);
+      
       await writeFile(cachePath, jsonData);
       
       const metadata: CacheMetadata = {
@@ -112,12 +133,18 @@ export class VideoCache {
       await this.cleanCache();
     } catch (error) {
       console.error(`Error writing cache for ${videoId}:`, error);
+      throw new Error(`Failed to cache data: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   private async saveMetadata(videoId: string, metadata: CacheMetadata): Promise<void> {
-    const metadataPath = join(CACHE_DIR, `${videoId}.metadata`);
-    await writeFile(metadataPath, JSON.stringify(metadata));
+    try {
+      const metadataPath = join(CACHE_DIR, `${videoId}.metadata`);
+      await writeFile(metadataPath, JSON.stringify(metadata));
+    } catch (error) {
+      console.error(`Error saving metadata for ${videoId}:`, error);
+      throw new Error(`Failed to save metadata: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async invalidateCache(videoId: string): Promise<void> {
