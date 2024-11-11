@@ -9,6 +9,7 @@ import { Form, FormControl, FormField, FormItem, FormMessage } from "@/component
 import SubtitleViewer from "../components/SubtitleViewer";
 import SummaryPanel from "../components/SummaryPanel";
 import { useToast } from "@/hooks/use-toast";
+import { Youtube } from "lucide-react";
 
 const urlSchema = z.object({
   videoUrl: z.string().url().refine((url) => {
@@ -72,44 +73,55 @@ export default function Home() {
   };
 
   return (
-    <div className="container mx-auto py-8 px-4 min-h-screen">
-      <div className="max-w-3xl mx-auto space-y-6">
-        <Card className="p-6 shadow-lg">
+    <div className="container mx-auto py-12 px-4 min-h-screen space-y-8">
+      <div className="max-w-3xl mx-auto space-y-8 animate-fade-in">
+        <Card className="p-8 shadow-lg bg-gradient-to-br from-background via-background to-muted transition-all duration-300 hover:shadow-xl">
           <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-3">
+            <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-4">
               <FormField
                 control={form.control}
                 name="videoUrl"
                 render={({ field }) => (
-                  <FormItem className="flex-1">
+                  <FormItem className="flex-1 relative">
                     <FormControl>
-                      <Input 
-                        placeholder="Enter YouTube URL (e.g., youtube.com/watch?v=... or youtu.be/...)" 
-                        className="h-11"
-                        {...field} 
-                      />
+                      <div className="relative">
+                        <Youtube className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+                        <Input 
+                          placeholder="Enter YouTube URL (e.g., youtube.com/watch?v=... or youtu.be/...)" 
+                          className="h-12 pl-11 pr-4 transition-all duration-200 border-2 hover:border-primary/50 focus:border-primary"
+                          {...field} 
+                        />
+                      </div>
                     </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}
               />
-              <Button type="submit" size="lg">
+              <Button 
+                type="submit" 
+                size="lg"
+                className="h-12 px-8 bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary transition-all duration-300 shadow-lg hover:shadow-xl"
+              >
                 Process Audio
               </Button>
             </form>
           </Form>
         </Card>
 
-        <Card className="shadow-lg">
-          <SubtitleViewer 
-            videoId={videoId} 
-            onTextUpdate={setTranscribedText}
-          />
-        </Card>
+        <div className="transition-all duration-500 transform">
+          <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+            <SubtitleViewer 
+              videoId={videoId} 
+              onTextUpdate={setTranscribedText}
+            />
+          </Card>
+        </div>
 
-        <Card className="shadow-lg">
-          <SummaryPanel text={transcribedText} />
-        </Card>
+        <div className="transition-all duration-500 transform">
+          <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+            <SummaryPanel text={transcribedText} />
+          </Card>
+        </div>
       </div>
     </div>
   );

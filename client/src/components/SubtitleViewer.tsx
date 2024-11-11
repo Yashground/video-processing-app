@@ -3,7 +3,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, AlertCircle, Globe } from "lucide-react";
+import { Loader2, AlertCircle, Globe, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
@@ -73,7 +73,6 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, [subtitles, onTextUpdate]);
 
-  // Simulate progress during processing with more stages for longer videos
   useEffect(() => {
     if (isValidating) {
       const stages = [
@@ -111,7 +110,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   if (!videoId) {
     return (
-      <div className="p-8 text-center text-muted-foreground text-lg">
+      <div className="p-8 text-center text-muted-foreground text-lg animate-fade-in">
         Enter a YouTube URL above to extract audio and generate subtitles
       </div>
     );
@@ -119,8 +118,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   if (error) {
     return (
-      <div className="p-6">
-        <Alert variant="destructive" className="mb-6">
+      <div className="p-6 animate-fade-in">
+        <Alert variant="destructive" className="mb-6 border-destructive/50 bg-destructive/10">
           <AlertCircle className="h-5 w-5" />
           <AlertTitle className="text-lg font-semibold">Audio Processing Failed</AlertTitle>
           <AlertDescription className="mt-2 text-base">
@@ -133,7 +132,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             </ul>
           </AlertDescription>
         </Alert>
-        <Button onClick={handleRetry} className="w-full h-11 text-base">
+        <Button 
+          onClick={handleRetry} 
+          className="w-full h-11 text-base bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary transition-all duration-300"
+        >
+          <RefreshCw className="mr-2 h-5 w-5" />
           Try Processing Again
         </Button>
       </div>
@@ -141,11 +144,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   }
 
   return (
-    <div className="p-6">
+    <div className="p-6 animate-fade-in">
       {subtitles?.[0]?.language && (
         <div className="flex items-center gap-2 mb-4">
-          <Globe className="h-4 w-4" />
-          <Badge variant="secondary">
+          <Globe className="h-5 w-5 text-primary" />
+          <Badge variant="secondary" className="bg-gradient-to-r from-primary/10 to-primary/5 text-primary px-3 py-1">
             {getLanguageName(subtitles[0].language)}
           </Badge>
         </div>
@@ -158,18 +161,29 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               <Loader2 className="h-5 w-5 animate-spin" />
               Processing Audio...
             </div>
-            <Progress value={progress} className="h-2" />
-            <Alert className="bg-muted">
+            <div className="relative">
+              <Progress 
+                value={progress} 
+                className="h-2 bg-primary/20 transition-all duration-300"
+                style={{
+                  background: 'linear-gradient(to right, hsl(var(--primary)) var(0%), hsl(var(--primary)/0.2) var(0%))',
+                  backgroundSize: '200% 100%',
+                  animation: 'gradient 2s linear infinite'
+                }}
+              />
+              <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-r from-primary/20 to-primary/10 animate-pulse" style={{ clipPath: `inset(0 ${100 - progress}% 0 0)` }} />
+            </div>
+            <Alert className="bg-muted/50 border-primary/20">
               <AlertTitle className="text-lg font-semibold mb-2">Processing Steps</AlertTitle>
               <AlertDescription className="text-base space-y-4">
                 <ul className="list-disc list-inside space-y-2">
-                  <li className={progress > 30 ? "text-muted-foreground" : ""}>
+                  <li className={`transition-colors duration-300 ${progress > 30 ? "text-muted-foreground" : ""}`}>
                     Downloading audio from YouTube
                   </li>
-                  <li className={progress > 50 ? "text-muted-foreground" : ""}>
+                  <li className={`transition-colors duration-300 ${progress > 50 ? "text-muted-foreground" : ""}`}>
                     Preparing audio for processing
                   </li>
-                  <li className={progress > 70 ? "text-muted-foreground" : ""}>
+                  <li className={`transition-colors duration-300 ${progress > 70 ? "text-muted-foreground" : ""}`}>
                     Detecting language and transcribing
                   </li>
                   <li>
@@ -196,7 +210,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
                 return acc;
               }, [] as string[][])
               .map((paragraph, index) => (
-                <p key={index} className="mb-6 leading-relaxed">
+                <p 
+                  key={index} 
+                  className="mb-6 leading-relaxed transition-colors duration-200 hover:text-primary/90 cursor-default"
+                >
                   {paragraph.join(' ')}
                 </p>
               ))}
