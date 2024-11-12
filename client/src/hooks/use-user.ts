@@ -1,25 +1,33 @@
 import useSWR from "swr";
 import type { User, InsertUser } from "db/schema";
+import { useLocation } from "wouter";
 
 export function useUser() {
-  const { data, error, mutate } = useSWR<User, Error>("/api/user", {
+  const [, setLocation] = useLocation();
+  
+  const { data, error, mutate } = useSWR<User>("/api/user", {
     revalidateOnFocus: false,
     revalidateOnReconnect: false,
     shouldRetryOnError: false,
     dedupingInterval: 5000,
     errorRetryCount: 1,
     onError: (error) => {
-      // Don't show errors for authentication failures
-      if (error.message === "Unauthorized" || error.message === "No session found") {
+      // Redirect to landing page for authentication errors
+      if (error.status === 401) {
+        setLocation("/");
         return;
       }
       console.error('User data fetch error:', error);
     }
   });
 
+  const isLoading = !error && !data;
+  const isError = error && error.status !== 401;
+
   return {
     user: data,
-    isLoading: !error && !data,
+    isLoading,
+    isError,
     error,
     login: async (user: InsertUser) => {
       try {
@@ -38,6 +46,7 @@ export function useUser() {
         const res = await handleRequest("/logout", "POST");
         if (res.ok) {
           await mutate(undefined, { revalidate: false });
+          setLocation("/");
         }
         return res;
       } catch (error) {
@@ -60,15 +69,10 @@ export function useUser() {
   };
 }
 
-type RequestResult =
-  | {
-      ok: true;
-      message?: string;
-    }
-  | {
-      ok: false;
-      message: string;
-    };
+type RequestResult = {
+  ok: boolean;
+  message?: string;
+};
 
 async function handleRequest(
   url: string,
