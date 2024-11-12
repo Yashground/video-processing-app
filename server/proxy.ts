@@ -1,6 +1,7 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import type { Express } from 'express';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { authenticateWs } from './auth';
 
 export const setupProxy = (app: Express) => {
   const viteProxy = createProxyMiddleware({
@@ -67,8 +68,7 @@ export const setupProxy = (app: Express) => {
     '/src',
     '/__vite_hmr',
     '/.vite',
-    '/node_modules',
-    '/progress'  // Add progress WebSocket path
+    '/node_modules'
   ], viteProxy);
 
   // Handle WebSocket upgrade events
@@ -82,9 +82,12 @@ export const setupProxy = (app: Express) => {
           socket.destroy();
           return;
         }
+
+        // After authentication, handle the upgrade
+        viteProxy.upgrade(req, socket, head);
       }
       
-      if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite') || req.url?.startsWith('/progress')) {
+      if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
         viteProxy.upgrade(req, socket, head);
       }
     } catch (error) {
@@ -94,21 +97,3 @@ export const setupProxy = (app: Express) => {
     }
   });
 };
-
-// Add the authenticateWs function
-async function authenticateWs(req: any) {
-  // Implement your authentication logic here
-  // Example: Check if a JWT token is present in the request headers
-  const token = req.headers.authorization?.split(' ')[1];
-  if (token) {
-    // Verify the JWT token
-    try {
-      // ... your JWT verification logic here ...
-      return true;
-    } catch (error) {
-      console.error('JWT verification error:', error);
-      return false;
-    }
-  }
-  return false;
-}

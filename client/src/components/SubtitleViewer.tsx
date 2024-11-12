@@ -179,37 +179,66 @@ function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
   let currentGroup: Subtitle[] = [];
   let lastEndTime = 0;
 
+  // Helper function to detect topic changes
+  function detectTopicChange(text1: string, text2: string): boolean {
+    const getKeywords = (text: string): Set<string> => {
+      const stopWords = new Set([
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+        'about', 'as', 'into', 'like', 'through', 'after', 'over', 'between', 'out', 'against',
+        'during', 'without', 'before', 'under', 'around', 'among'
+      ]);
+      
+      return new Set(
+        text.toLowerCase()
+          .replace(/[.,!?;:]/g, '')
+          .split(/\s+/)
+          .filter(word => word.length > 3 && !stopWords.has(word))
+      );
+    };
+
+    const keywords1 = getKeywords(text1);
+    const keywords2 = getKeywords(text2);
+    
+    // Calculate Jaccard similarity coefficient
+    const intersection = new Set([...keywords1].filter(x => keywords2.has(x)));
+    const union = new Set([...keywords1, ...keywords2]);
+    
+    return intersection.size / union.size < 0.2; // Less than 20% similarity indicates topic change
+  }
+
+  // Helper function to detect semantic transitions
+  function detectSemanticTransition(text: string): boolean {
+    const transitionPhrases = [
+      'however', 'moreover', 'furthermore', 'in addition', 'consequently',
+      'therefore', 'thus', 'hence', 'as a result', 'in conclusion',
+      'finally', 'to summarize', 'in contrast', 'on the other hand',
+      'alternatively', 'meanwhile', 'subsequently', 'nevertheless',
+      'in fact', 'indeed', 'notably', 'specifically', 'particularly',
+      'for example', 'for instance', 'in other words', 'that is'
+    ];
+
+    const lowercaseText = text.toLowerCase();
+    return transitionPhrases.some(phrase => lowercaseText.startsWith(phrase));
+  }
+
   for (let i = 0; i < subtitles.length; i++) {
     const subtitle = subtitles[i];
     const timeGap = subtitle.start - lastEndTime;
     const currentText = subtitle.text.trim();
-    
-    // Check for semantic breaks
-    const isSemanticBreak = currentText.startsWith('However,') || 
-                           currentText.startsWith('Moreover,') ||
-                           currentText.startsWith('Furthermore,') ||
-                           currentText.startsWith('In conclusion,') ||
-                           currentText.startsWith('Finally,');
-
-    // Check for natural pauses
-    const hasNaturalPause = timeGap > 1500; // 1.5 seconds
-
-    // Check for topic shifts (significant word changes)
     const previousText = currentGroup[currentGroup.length - 1]?.text || '';
-    const isTopicShift = !hasCommonWords(previousText, currentText);
 
-    // Start a new group if:
-    // 1. Current group is empty
-    // 2. There's a significant time gap (natural pause)
-    // 3. Current group has reached optimal size (3-5 sentences)
-    // 4. Previous sentence ends with strong punctuation and current starts new thought
-    // 5. There's a semantic break indicator
+    // Factors that influence grouping decisions
+    const hasLongPause = timeGap > 2000; // 2 seconds pause
+    const isSemanticTransition = detectSemanticTransition(currentText);
+    const isTopicChange = previousText && detectTopicChange(previousText, currentText);
+    const isEndOfThought = previousText.endsWith('.') || previousText.endsWith('!') || previousText.endsWith('?');
+    const isOptimalGroupSize = currentGroup.length >= 3 && currentGroup.length <= 5;
+
     const shouldStartNewGroup = 
       currentGroup.length === 0 ||
-      hasNaturalPause ||
-      currentGroup.length >= 4 ||
-      (previousText.match(/[.!?]$/) && (isSemanticBreak || isTopicShift)) ||
-      isSemanticBreak;
+      hasLongPause ||
+      (isEndOfThought && (isSemanticTransition || isTopicChange)) ||
+      (isOptimalGroupSize && isEndOfThought);
 
     if (shouldStartNewGroup && currentGroup.length > 0) {
       groups.push([...currentGroup]);
@@ -220,6 +249,7 @@ function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
     lastEndTime = subtitle.end;
   }
 
+  // Don't forget the last group
   if (currentGroup.length > 0) {
     groups.push(currentGroup);
   }
@@ -227,7 +257,6 @@ function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
   return groups;
 }
 
-// Helper function to check if two text segments share common significant words
 function hasCommonWords(text1: string, text2: string): boolean {
   const getSignificantWords = (text: string): Set<string> => {
     const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
@@ -358,6 +387,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           if (ws.readyState !== WebSocket.OPEN) {
             ws.close();
             reject(new Error('Connection timeout'));
+            toast({
+              title: "Connection Error",
+              description: "Failed to establish connection with the server. Please try again.",
+              variant: "destructive"
+            });
           }
         }, 5000);
 
@@ -691,11 +725,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
                 <ScrollArea className="h-[600px] rounded-lg border bg-background/50 backdrop-blur-sm">
                   <div className={textStyles.textContainer}>
-                    {groupSentencesByContext(subtitles).map((group, groupIndex) => (
-                      <div key={`group-${groupIndex}`} className={textStyles.paragraphGroup}>
+                    {subtitles && groupSentencesByContext(subtitles).map((group, groupIndex) => (
+                      <div 
+                        key={`group-${groupIndex}`} 
+                        className={textStyles.paragraphGroup}
+                      >
                         {group.map((subtitle, index) => (
                           <div 
-                            key={`${subtitle.start}-${subtitle.end}`}
+                            key={`${groupIndex}-${index}`} // Unique key for each subtitle within the group
                             className={textStyles.paragraph}
                           >
                             {subtitle.text}

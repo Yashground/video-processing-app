@@ -41,11 +41,16 @@ export interface AuthenticatedRequest extends Request {
 
 export const authenticateWs = async (request: any): Promise<AuthenticatedRequest | false> => {
   try {
-    if (!request.headers.cookie) {
+    console.log('WebSocket authentication attempt');
+    
+    // Get session ID from cookies
+    const cookieHeader = request.headers.cookie;
+    if (!cookieHeader) {
+      console.log('WebSocket authentication failed: no cookies present');
       return false;
     }
 
-    const cookies = request.headers.cookie.split(';').reduce((acc: { [key: string]: string }, cookie: string) => {
+    const cookies = cookieHeader.split(';').reduce((acc: { [key: string]: string }, cookie: string) => {
       const [key, value] = cookie.trim().split('=');
       acc[key.trim()] = decodeURIComponent(value);
       return acc;
@@ -53,23 +58,33 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
 
     const sessionId = cookies['watch-hour-session'];
     if (!sessionId) {
+      console.log('WebSocket authentication failed: no session cookie found');
       return false;
     }
 
+    // Create memory store instance
     const store = new (createMemoryStore(session))({
       checkPeriod: 86400000
     });
 
+    // Get session data
     const sessionData: any = await new Promise((resolve) => {
       store.get(sessionId, (err, session) => {
+        if (err) {
+          console.error('Session retrieval error:', err);
+          resolve(null);
+          return;
+        }
         resolve(session || null);
       });
     });
 
     if (!sessionData || !sessionData.passport?.user) {
+      console.log('WebSocket authentication failed: invalid session data');
       return false;
     }
 
+    // Verify user exists
     const [user] = await db
       .select()
       .from(users)
@@ -77,9 +92,11 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
       .limit(1);
 
     if (!user) {
+      console.log('WebSocket authentication failed: user not found');
       return false;
     }
 
+    console.log('WebSocket authentication successful for user:', user.username);
     return { ...request, user, session: { ...sessionData, userId: user.id } } as AuthenticatedRequest;
   } catch (error) {
     console.error('WebSocket authentication error:', error);
