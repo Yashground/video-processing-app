@@ -353,6 +353,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, [subtitles, onTextUpdate]);
 
+  // Add authentication check
+  const { data: user, error: authError } = useSWR('/api/user');
+  const isAuthenticated = !!user && !authError;
+
   const cleanupWebSocket = () => {
     if (wsRef.current) {
       wsRef.current.close(1000, "Cleanup");
@@ -374,148 +378,163 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     setWsError(new Error(errorMessage));
     setWsConnected(false);
 
-    // Show error toast with specific message
-    const errorDescription = errorMessage.includes('Authentication failed') 
-      ? 'Please log in to continue.'
-      : errorMessage;
-      
+    if (errorMessage.includes('401') || errorMessage.includes('Authentication failed')) {
+      toast({
+        title: "Authentication Error",
+        description: "Please log in to continue.",
+        variant: "destructive"
+      });
+      window.location.href = '/login';
+      return;
+    }
+
     toast({
       title: "Connection Error",
-      description: errorDescription,
+      description: errorMessage,
       variant: "destructive"
     });
-
-    // If authentication error, redirect to login
-    if (errorMessage.includes('Authentication failed')) {
-      window.location.href = '/login';
-    }
   };
 
   const connectWebSocket = () => {
     if (!videoId) return Promise.reject(new Error('No video ID provided'));
+    if (!isAuthenticated) return Promise.reject(new Error('Authentication required'));
     
     return new Promise<void>((resolve, reject) => {
       try {
         cleanupWebSocket();
         setWsRetrying(true);
 
-        // Get the current host and construct WebSocket URL
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/progress`;
+        // Use absolute path for WebSocket URL
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/progress`;
         
+        console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         // Set connection timeout
         const connectionTimeout = setTimeout(() => {
           if (ws.readyState !== WebSocket.OPEN) {
+            console.error('WebSocket connection timeout');
             ws.close();
             reject(new Error('Connection timeout'));
-            toast({
-              title: "Connection Error",
-              description: "Failed to establish connection. Server might be unavailable.",
-              variant: "destructive"
-            });
           }
-        }, 5000);
+        }, 15000);
 
         ws.addEventListener('open', () => {
+          console.log('WebSocket connection established');
           clearTimeout(connectionTimeout);
           setWsConnected(true);
           setWsRetrying(false);
           setWsError(null);
-          setRetryCount(0); // Reset retry count on successful connection
-          
+          setRetryCount(0);
+
           // Setup heartbeat ping
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+          }
+
           pingIntervalRef.current = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'ping' }));
+              try {
+                ws.send(JSON.stringify({
+                  type: 'ping',
+                  videoId,
+                  timestamp: Date.now()
+                }));
+              } catch (error) {
+                console.error('Error sending heartbeat:', error);
+                handleWebSocketError(error as Error);
+              }
             }
-          }, 30000);
-          
-          // Send initialization message with videoId
-          ws.send(JSON.stringify({ type: 'init', videoId }));
-          resolve();
+          }, 10000);
+
+          // Send initialization message
+          try {
+            ws.send(JSON.stringify({
+              type: 'init',
+              videoId,
+              timestamp: Date.now()
+            }));
+            resolve();
+          } catch (error) {
+            console.error('Error sending init message:', error);
+            reject(error);
+          }
         });
 
         ws.addEventListener('message', (event) => {
           try {
             const data = JSON.parse(event.data);
             
-            // Handle different message types
-            switch(data.type) {
-              case 'pong':
-                return;
-              case 'error':
-                if (data.message?.includes('Authentication failed')) {
-                  handleWebSocketError(new Error('Authentication failed'));
-                  return;
-                }
-                break;
-              case 'auth_required':
-                window.location.href = '/login';
-                return;
+            if (data.type === 'error') {
+              handleWebSocketError(new Error(data.message));
+              return;
             }
 
-            // Handle progress updates
-            if (data.videoId === videoId) {
+            if (data.type === 'auth_required') {
+              window.location.href = '/login';
+              return;
+            }
+
+            if (data.type === 'progress' && data.videoId === videoId) {
               if (data.error) {
                 handleWebSocketError(new Error(data.error));
                 return;
               }
-              
               setProgress(data.progress);
-              setProgressMessage(data.message || "");
-              setProgressStage(data.stage);
-              setProgressSubstage(data.substage || "");
-              setWsError(null);
+              setProgressMessage(data.message || '');
+              setProgressStage(data.stage || '');
+              setProgressSubstage(data.substage || '');
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
-            handleWebSocketError(new Error('Invalid message format'));
           }
-        });
-
-        ws.addEventListener('error', (event) => {
-          console.error('WebSocket error:', event);
-          handleWebSocketError(event);
         });
 
         ws.addEventListener('close', (event) => {
+          console.log('WebSocket connection closed:', event.code, event.reason);
           clearTimeout(connectionTimeout);
-          console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
-          setWsConnected(false);
-
-          // Handle authentication failure
-          if (event.code === 1008) {
-            handleWebSocketError(new Error('Authentication failed'));
-            return;
+          
+          // Clean up existing intervals
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
           }
-
-          // Implement exponential backoff for reconnection
-          if (event.code !== 1000 && event.code !== 1001 && retryCount < maxRetries) {
-            const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
-            setWsRetrying(true);
-            setRetryCount(prev => prev + 1);
-
-            retryTimeoutRef.current = setTimeout(() => {
-              connectWebSocket().catch(error => {
-                console.error('Reconnection failed:', error);
-                if (retryCount >= maxRetries) {
-                  setWsRetrying(false);
-                  toast({
-                    title: "Connection Failed",
-                    description: "Maximum retry attempts reached. Please refresh the page.",
-                    variant: "destructive"
-                  });
-                }
-              });
-            }, retryDelay);
-          } else {
-            setWsRetrying(false);
-            handleWebSocketError(new Error('Connection closed'));
+          
+          setWsConnected(false);
+          
+          // Handle abnormal closure with exponential backoff
+          if (event.code === 1006 || event.code === 1001) {
+            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+            if (retryCount < maxRetries) {
+              console.log(`Retrying connection in ${backoffDelay}ms (attempt ${retryCount + 1}/${maxRetries})`);
+              setWsRetrying(true);
+              setRetryCount(prev => prev + 1);
+              
+              if (retryTimeoutRef.current) {
+                clearTimeout(retryTimeoutRef.current);
+              }
+              
+              retryTimeoutRef.current = setTimeout(() => {
+                connectWebSocket().catch((error) => {
+                  console.error('Retry failed:', error);
+                  handleWebSocketError(error);
+                });
+              }, backoffDelay);
+            } else {
+              setWsError(new Error('Maximum retry attempts reached'));
+              setWsRetrying(false);
+            }
           }
         });
+
+        ws.addEventListener('error', (error) => {
+          console.error('WebSocket error:', error);
+          clearTimeout(connectionTimeout);
+          handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection failed'));
+          reject(error);
+        });
+
       } catch (error) {
         console.error('Error setting up WebSocket:', error);
         reject(error);
@@ -523,17 +542,18 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     });
   };
 
-  // Effect to handle WebSocket connection
+  // Connect WebSocket when component mounts or videoId changes
   useEffect(() => {
-    if (videoId) {
-      connectWebSocket().catch(error => {
+    if (videoId && isAuthenticated) {
+      connectWebSocket().catch((error) => {
         console.error('Initial WebSocket connection failed:', error);
       });
     }
+
     return () => {
       cleanupWebSocket();
     };
-  }, [videoId]);
+  }, [videoId, isAuthenticated]);
 
   const handleRetry = () => {
     setRetryCount(0);

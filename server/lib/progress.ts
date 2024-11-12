@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import type { AuthenticatedRequest } from '../auth';
+import type { IncomingMessage } from 'http';
 
 export interface ProgressUpdate {
   videoId: string;
@@ -17,9 +18,8 @@ class ProgressTracker extends EventEmitter {
   private wss: WebSocketServer | null = null;
   private progressMap: Map<string, ProgressUpdate> = new Map();
   private clientHeartbeats: Map<WebSocket, NodeJS.Timeout> = new Map();
-  private readonly HEARTBEAT_INTERVAL = 30000;
-  private readonly HEARTBEAT_TIMEOUT = 35000;
-  private readonly MAX_RETRIES = 3;
+  private readonly HEARTBEAT_INTERVAL = 10000;
+  private readonly HEARTBEAT_TIMEOUT = 30000;
 
   private constructor() {
     super();
@@ -43,7 +43,7 @@ class ProgressTracker extends EventEmitter {
     }, this.HEARTBEAT_TIMEOUT));
   }
 
-  initializeWebSocket(server: Server, authenticate: (request: any) => Promise<AuthenticatedRequest | false>) {
+  initializeWebSocket(server: Server, authenticate: (request: IncomingMessage) => Promise<AuthenticatedRequest | false>) {
     if (this.wss) {
       console.log('WebSocket server already initialized');
       return;
@@ -51,17 +51,24 @@ class ProgressTracker extends EventEmitter {
 
     this.wss = new WebSocketServer({
       server,
-      path: '/progress',
+      path: '/api/ws/progress',
       verifyClient: async (info, callback) => {
         try {
+          console.log('Verifying WebSocket client connection');
           const authResult = await authenticate(info.req);
+          
           if (!authResult) {
-            console.log('WebSocket authentication failed');
+            console.error('WebSocket authentication failed');
             callback(false, 401, 'Unauthorized');
             return;
           }
-          info.req.user = authResult.user;
-          info.req.session = authResult.session;
+
+          // Store authenticated user info in the request object
+          Object.assign(info.req, {
+            user: authResult.user,
+            session: authResult.session
+          });
+
           callback(true);
         } catch (error) {
           console.error('WebSocket authentication error:', error);
@@ -70,50 +77,52 @@ class ProgressTracker extends EventEmitter {
       }
     });
 
-    this.wss.on('connection', async (ws, req) => {
-      console.log('New WebSocket connection authenticated');
-      
+    this.wss.on('connection', (ws: WebSocket, req: AuthenticatedRequest) => {
+      const userId = req.user?.id;
+      console.log('New WebSocket connection established for user:', userId);
+
       // Set up heartbeat handling
       this.handleHeartbeat(ws);
-      
-      // Send initial progress state
+
+      // Send initial progress state if available
       this.progressMap.forEach((progress) => {
         if (ws.readyState === WebSocket.OPEN) {
           try {
-            ws.send(JSON.stringify(progress));
+            ws.send(JSON.stringify({
+              type: 'progress',
+              ...progress
+            }));
           } catch (error) {
             console.error('Error sending initial progress:', error);
           }
         }
       });
 
-      ws.on('pong', () => {
-        this.handleHeartbeat(ws);
-      });
-
+      // Handle incoming messages
       ws.on('message', (data) => {
         try {
           const message = JSON.parse(data.toString());
+          
           if (message.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong' }));
+            ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
             this.handleHeartbeat(ws);
+          }
+
+          if (message.type === 'init' && message.videoId) {
+            const progress = this.progressMap.get(message.videoId);
+            if (progress) {
+              ws.send(JSON.stringify({
+                type: 'progress',
+                ...progress
+              }));
+            }
           }
         } catch (error) {
           console.error('Error handling WebSocket message:', error);
         }
       });
 
-      ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-        this.cleanup(ws);
-      });
-
-      ws.on('close', (code, reason) => {
-        console.log(`Client disconnected from progress WebSocket: ${code} - ${reason}`);
-        this.cleanup(ws);
-      });
-
-      // Setup heartbeat interval
+      // Setup heartbeat ping interval
       const heartbeatInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           try {
@@ -125,12 +134,26 @@ class ProgressTracker extends EventEmitter {
           }
         } else {
           clearInterval(heartbeatInterval);
+          this.cleanup(ws);
         }
       }, this.HEARTBEAT_INTERVAL);
 
-      ws.on('close', () => clearInterval(heartbeatInterval));
+      // Handle connection close
+      ws.on('close', (code, reason) => {
+        console.log(`WebSocket connection closed for user ${userId}:`, code, reason);
+        clearInterval(heartbeatInterval);
+        this.cleanup(ws);
+      });
+
+      // Handle errors
+      ws.on('error', (error) => {
+        console.error(`WebSocket error for user ${userId}:`, error);
+        clearInterval(heartbeatInterval);
+        this.cleanup(ws);
+      });
     });
 
+    // Handle server errors
     this.wss.on('error', (error) => {
       console.error('WebSocket server error:', error);
     });
@@ -138,7 +161,10 @@ class ProgressTracker extends EventEmitter {
     // Handle progress updates
     this.on('progress', (update: ProgressUpdate) => {
       this.progressMap.set(update.videoId, update);
-      this.broadcast(update);
+      this.broadcast(JSON.stringify({
+        type: 'progress',
+        ...update
+      }));
     });
   }
 
@@ -147,25 +173,30 @@ class ProgressTracker extends EventEmitter {
       clearTimeout(this.clientHeartbeats.get(ws)!);
       this.clientHeartbeats.delete(ws);
     }
+
     if (ws.readyState === WebSocket.OPEN) {
       try {
-        ws.close(1000, 'Normal Closure');
+        ws.close(1000, 'Normal closure');
       } catch (error) {
         console.error('Error closing WebSocket:', error);
+        try {
+          ws.terminate();
+        } catch (terminateError) {
+          console.error('Error terminating WebSocket:', terminateError);
+        }
       }
     }
   }
 
-  private broadcast(update: ProgressUpdate) {
+  private broadcast(message: string) {
     if (!this.wss) return;
-    
-    const message = JSON.stringify(update);
+
     this.wss.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
         try {
           client.send(message);
         } catch (error) {
-          console.error('Error broadcasting progress update:', error);
+          console.error('Error broadcasting message:', error);
           this.cleanup(client);
         }
       }
@@ -173,9 +204,9 @@ class ProgressTracker extends EventEmitter {
   }
 
   updateProgress(
-    videoId: string, 
-    stage: ProgressUpdate['stage'], 
-    progress: number, 
+    videoId: string,
+    stage: ProgressUpdate['stage'],
+    progress: number,
     message?: string,
     substage?: string
   ) {
@@ -186,7 +217,6 @@ class ProgressTracker extends EventEmitter {
       message,
       substage
     };
-    
     this.emit('progress', update);
   }
 
@@ -197,7 +227,6 @@ class ProgressTracker extends EventEmitter {
       progress: 0,
       error
     };
-    
     this.emit('progress', update);
     this.progressMap.delete(videoId);
   }

@@ -9,6 +9,7 @@ import { users, insertUserSchema, type User as SelectUser } from "db/schema";
 import { db } from "db";
 import { eq } from "drizzle-orm";
 import cookie from "cookie";
+import { AuthenticatedSession } from "./types/express-session";
 
 const scryptAsync = promisify(scrypt);
 const crypto = {
@@ -37,7 +38,7 @@ declare global {
 
 export interface AuthenticatedRequest extends Request {
   user?: Express.User;
-  session: session.Session & { userId?: number };
+  session: AuthenticatedSession;
 }
 
 // Create memory store instance outside to be shared
@@ -46,12 +47,11 @@ const sessionStore = new (createMemoryStore(session))({
   ttl: 24 * 60 * 60 * 1000
 });
 
-export const authenticateWs = async (request: any): Promise<AuthenticatedRequest | false> => {
+export const authenticateWs = async (request: Request): Promise<AuthenticatedRequest | false> => {
   try {
-    // Parse cookies using cookie library
     const cookieHeader = request.headers.cookie;
     if (!cookieHeader) {
-      console.log('WebSocket authentication failed: no cookies found');
+      console.error('WebSocket authentication failed: no cookies found');
       return false;
     }
 
@@ -59,15 +59,29 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
     const sessionId = cookies['watch-hour-session'];
     
     if (!sessionId) {
-      console.log('WebSocket authentication failed: no session cookie found');
+      console.error('WebSocket authentication failed: no session cookie');
       return false;
     }
 
-    // Get session data from store
+    // Clean the session ID by removing the 's:' prefix and signature
+    const cleanSessionId = decodeURIComponent(sessionId.split('.')[0].replace(/^s:/, ''));
+    
     return new Promise((resolve) => {
-      sessionStore.get(sessionId, async (err, session) => {
-        if (err || !session || !session.passport?.user) {
-          console.log('WebSocket authentication failed: invalid session data');
+      sessionStore.get(cleanSessionId, async (err, session) => {
+        if (err) {
+          console.error('Session store error:', err);
+          resolve(false);
+          return;
+        }
+
+        if (!session) {
+          console.error('No session found for ID:', cleanSessionId);
+          resolve(false);
+          return;
+        }
+
+        if (!session.passport?.user) {
+          console.error('No user in session:', session);
           resolve(false);
           return;
         }
@@ -80,16 +94,17 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
             .limit(1);
 
           if (!user) {
-            console.log('WebSocket authentication failed: user not found');
+            console.error('User not found in database:', session.passport.user);
             resolve(false);
             return;
           }
 
-          resolve({
-            ...request,
-            user,
-            session
-          });
+          // Attach user and session to request object
+          const authenticatedRequest = request as AuthenticatedRequest;
+          authenticatedRequest.user = user;
+          authenticatedRequest.session = session as AuthenticatedSession;
+
+          resolve(authenticatedRequest);
         } catch (error) {
           console.error('Database error during WebSocket authentication:', error);
           resolve(false);
@@ -109,13 +124,14 @@ export function setupAuth(app: Express) {
     saveUninitialized: false,
     name: 'watch-hour-session',
     cookie: {
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      maxAge: 24 * 60 * 60 * 1000,
       httpOnly: true,
       sameSite: 'lax',
-      path: '/',
-      secure: app.get("env") === "production"
+      secure: app.get("env") === "production",
+      path: '/'
     },
-    store: sessionStore
+    store: sessionStore,
+    rolling: true // Refresh session on each request
   };
 
   if (app.get("env") === "production") {
@@ -171,6 +187,46 @@ export function setupAuth(app: Express) {
     }
   });
 
+  // Login route
+  app.post("/login", (req, res, next) => {
+    const result = insertUserSchema.safeParse(req.body);
+    if (!result.success) {
+      return res
+        .status(400)
+        .json({ message: "Invalid input", errors: result.error.flatten() });
+    }
+
+    passport.authenticate("local", (err: any, user: Express.User, info: IVerifyOptions) => {
+      if (err) {
+        console.error('Authentication error:', err);
+        return next(err);
+      }
+      if (!user) {
+        return res.status(400).json({
+          message: info.message ?? "Login failed",
+        });
+      }
+      
+      req.login(user, (err) => {
+        if (err) {
+          console.error('Login error:', err);
+          return next(err);
+        }
+        req.session.save((err) => {
+          if (err) {
+            console.error('Session save error:', err);
+            return next(err);
+          }
+          return res.json({
+            message: "Login successful",
+            user: { id: user.id, username: user.username },
+          });
+        });
+      });
+    })(req, res, next);
+  });
+
+  // Registration route
   app.post("/register", async (req, res, next) => {
     try {
       const result = insertUserSchema.safeParse(req.body);
@@ -224,44 +280,7 @@ export function setupAuth(app: Express) {
     }
   });
 
-  app.post("/login", (req, res, next) => {
-    const result = insertUserSchema.safeParse(req.body);
-    if (!result.success) {
-      return res
-        .status(400)
-        .json({ message: "Invalid input", errors: result.error.flatten() });
-    }
-
-    passport.authenticate("local", (err: any, user: Express.User, info: IVerifyOptions) => {
-      if (err) {
-        console.error('Authentication error:', err);
-        return next(err);
-      }
-      if (!user) {
-        return res.status(400).json({
-          message: info.message ?? "Login failed",
-        });
-      }
-      
-      req.login(user, (err) => {
-        if (err) {
-          console.error('Login error:', err);
-          return next(err);
-        }
-        req.session.save((err) => {
-          if (err) {
-            console.error('Session save error:', err);
-            return next(err);
-          }
-          return res.json({
-            message: "Login successful",
-            user: { id: user.id, username: user.username },
-          });
-        });
-      });
-    })(req, res, next);
-  });
-
+  // Logout route
   app.post("/logout", (req, res) => {
     if (!req.isAuthenticated()) {
       return res.status(400).json({ message: "Not logged in" });
@@ -283,6 +302,7 @@ export function setupAuth(app: Express) {
     });
   });
 
+  // User info route
   app.get("/api/user", (req, res) => {
     if (!req.session) {
       return res.status(401).json({ message: "No session found" });
