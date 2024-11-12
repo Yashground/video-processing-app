@@ -32,6 +32,12 @@ const SUPPORTED_LANGUAGES = {
   zh: "Chinese"
 };
 
+const textStyles = {
+  container: "px-6 py-4 space-y-4",
+  paragraph: "leading-7 tracking-wide text-base text-foreground/90",
+  textContainer: "prose prose-zinc dark:prose-invert max-w-none"
+};
+
 export default function TranslationPanel({ text }: TranslationPanelProps) {
   const [targetLanguage, setTargetLanguage] = useState<string>("es");
   const [translatedText, setTranslatedText] = useState<string>("");
@@ -99,7 +105,7 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
           <Button
             onClick={handleTranslate}
             disabled={isTranslating || !text}
-            className="min-w-[120px] bg-primary"
+            className="min-w-[120px] bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary"
           >
             {isTranslating ? (
               <>
@@ -113,7 +119,7 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
         </div>
       </div>
 
-      <ScrollArea className="h-[300px] rounded-lg border">
+      <ScrollArea className="h-[300px] rounded-lg border bg-card">
         {error ? (
           <Alert variant="destructive" className="m-4">
             <AlertCircle className="h-4 w-4" />
@@ -121,11 +127,17 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         ) : translatedText ? (
-          <div className="p-4 prose prose-sm max-w-none dark:prose-invert">
-            <p className="whitespace-pre-wrap">{translatedText}</p>
+          <div className={textStyles.container}>
+            <div className={textStyles.textContainer}>
+              {translatedText.split('\n\n').map((paragraph, index) => (
+                <p key={index} className={textStyles.paragraph}>
+                  {paragraph}
+                </p>
+              ))}
+            </div>
           </div>
         ) : (
-          <div className="p-4 text-center text-muted-foreground">
+          <div className="p-8 text-center text-muted-foreground">
             Select a target language and click Translate to begin
           </div>
         )}

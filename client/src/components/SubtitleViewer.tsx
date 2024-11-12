@@ -399,6 +399,13 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     );
   }
 
+  const textStyles = {
+    paragraph: "mb-4 leading-7 tracking-wide text-base text-foreground/90",
+    timestamp: "text-xs text-muted-foreground",
+    container: "px-6 py-4 space-y-4",
+    textContainer: "prose prose-zinc dark:prose-invert max-w-none",
+  };
+
   return (
     <ErrorBoundary onError={handleError}>
       <div className="p-6 animate-fade-in">
@@ -466,41 +473,44 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
                 <div className="relative">
                   <Progress 
                     value={progress} 
-                    className="h-2 bg-primary/20 transition-all duration-300"
+                    className="h-2 bg-muted transition-all duration-300"
                   />
                 </div>
-                <Alert className="bg-muted/50 border-primary/20">
-                  <AlertTitle className="text-lg font-semibold mb-4">Processing Progress</AlertTitle>
-                  <AlertDescription className="text-base">
-                    <ProgressStages stage={progressStage} substage={progressSubstage} />
-                  </AlertDescription>
-                </Alert>
+                <ProgressStages stage={progressStage} substage={progressSubstage} />
               </div>
-            ) : subtitles ? (
-              <div className="prose prose-lg max-w-none dark:prose-invert">
-                {subtitles
-                  .reduce((acc, subtitle) => {
-                    const lastParagraph = acc[acc.length - 1] || [];
-                    if (lastParagraph.length < 5) {
-                      lastParagraph.push(subtitle.text);
-                      if (acc.length === 0) acc.push(lastParagraph);
-                    } else {
-                      acc.push([subtitle.text]);
-                    }
-                    return acc;
-                  }, [] as string[][])
-                  .map((paragraph, index) => (
-                    <p 
-                      key={index} 
-                      className="mb-6 leading-relaxed transition-colors duration-200 hover:text-primary/90 cursor-default"
-                    >
-                      {paragraph.join(' ')}
-                    </p>
-                  ))}
+            ) : subtitles && subtitles.length > 0 ? (
+              <div className={textStyles.container}>
+                {/* Smart paragraph grouping based on timing */}
+                {subtitles.reduce((groups: JSX.Element[], subtitle, index) => {
+                  const currentSubtitle = subtitle;
+                  const nextSubtitle = subtitles[index + 1];
+                  const timeBetweenSubtitles = nextSubtitle ? nextSubtitle.start - currentSubtitle.end : 0;
+                  const isNewParagraph = timeBetweenSubtitles > 1500; // 1.5 seconds gap indicates new paragraph
+
+                  const formattedTime = new Date(currentSubtitle.start).toISOString().substr(11, 8);
+                  
+                  const element = (
+                    <div key={`${currentSubtitle.start}-${currentSubtitle.end}`} className="group">
+                      <div className={textStyles.paragraph}>
+                        <span className={`${textStyles.timestamp} opacity-0 group-hover:opacity-100 transition-opacity duration-200`}>
+                          [{formattedTime}]
+                        </span>
+                        <span className="ml-2">{currentSubtitle.text}</span>
+                      </div>
+                      {isNewParagraph && <div className="my-6 border-t border-border/40" />}
+                    </div>
+                  );
+                  
+                  groups.push(element);
+                  return groups;
+                }, [])}
               </div>
             ) : (
-              <div className="text-center text-muted-foreground text-lg">
-                No content available
+              <div className="p-8 text-center text-muted-foreground text-lg animate-fade-in">
+                <p className="mb-4">✨ Transform YouTube videos into readable text</p>
+                <p className="text-sm text-muted-foreground">
+                  Enter a YouTube URL above to extract audio and generate transcriptions
+                </p>
               </div>
             )}
           </ScrollArea>
