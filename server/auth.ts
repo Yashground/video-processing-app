@@ -63,13 +63,11 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
       return false;
     }
 
-    // Parse and clean session ID more robustly
-    const sessionId = decodeURIComponent(sessionCookie)
-      .split('.')
-      .shift()
-      ?.replace(/^s:/, '') || '';
+    // Enhanced session ID parsing with validation
+    const sessionMatch = sessionCookie.match(/^s:([^.]+)\./);
+    const sessionId = sessionMatch ? sessionMatch[1] : '';
 
-    if (!sessionId) {
+    if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       console.error('WebSocket authentication failed: invalid session ID format');
       return false;
     }
@@ -84,6 +82,12 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
 
         if (!session) {
           console.error('No valid session found for ID:', sessionId);
+          // Clean up invalid session
+          sessionStore.destroy(sessionId, (destroyErr) => {
+            if (destroyErr) {
+              console.error('Error destroying invalid session:', destroyErr);
+            }
+          });
           resolve(false);
           return;
         }
@@ -107,8 +111,9 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
             return;
           }
 
-          // Extend session TTL on successful authentication
-          sessionStore.touch(sessionId, session, (err) => {
+          // Extend session TTL and update last activity
+          session.lastActivity = Date.now();
+          sessionStore.set(sessionId, session, (err) => {
             if (err) {
               console.error('Error extending session TTL:', err);
             }

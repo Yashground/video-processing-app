@@ -327,14 +327,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   // Updated WebSocket Configuration
   const WS_CONFIG = {
-    connectionTimeout: 15000,
-    maxRetries: maxRetries,
-    minReconnectionDelay: reconnectDelay,
-    maxReconnectionDelay: 30000,
-    reconnectionDelayGrowFactor: 1.5,
+    connectionTimeout: 10000, // Reduced from 15000
+    maxRetries: 5,
+    minReconnectionDelay: 2000,
+    maxReconnectionDelay: 10000, // Reduced from 30000
+    reconnectionDelayGrowFactor: 1.2, // Reduced from 1.5
     debug: process.env.NODE_ENV === 'development',
-    timeoutInterval: 10000,
-    maxEnqueuedMessages: 100,
+    timeoutInterval: 5000, // Reduced from 10000
+    maxEnqueuedMessages: 50, // Reduced from 100
   };
 
   const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
@@ -389,7 +389,17 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     console.log('Connecting to WebSocket:', wsUrl);
     
     try {
-      const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
+      const ws = new ReconnectingWebSocket(wsUrl, [], {
+        ...WS_CONFIG,
+        shouldReconnect: (closeEvent) => {
+          // Don't reconnect on normal closure or unauthorized
+          if (closeEvent.code === 1000 || closeEvent.code === 1008) {
+            return false;
+          }
+          return retryCount < WS_CONFIG.maxRetries;
+        },
+      });
+      
       wsRef.current = ws;
 
       ws.addEventListener('open', () => {
@@ -399,15 +409,21 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         setWsError(null);
         setRetryCount(0);
 
-        try {
-          ws.send(JSON.stringify({
-            type: 'init',
-            videoId,
-            timestamp: Date.now()
-          }));
-        } catch (err) {
-          handleWebSocketError(err instanceof Error ? err : new Error('Failed to initialize WebSocket'));
-        }
+        // Add connection initialization with retry
+        const initConnection = () => {
+          try {
+            ws.send(JSON.stringify({
+              type: 'init',
+              videoId,
+              timestamp: Date.now()
+            }));
+          } catch (err) {
+            console.error('Failed to initialize WebSocket:', err);
+            setTimeout(initConnection, 1000);
+          }
+        };
+        
+        initConnection();
       });
 
       ws.addEventListener('message', (event) => {
@@ -448,8 +464,15 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         console.log('WebSocket connection closed:', event.code, event.reason);
         setWsConnected(false);
         
-        if (event.code === 1000) {
-          console.log('WebSocket closed normally');
+        if (event.code === 1000 || event.code === 1008) {
+          console.log('WebSocket closed normally or unauthorized');
+          cleanup();
+          return;
+        }
+
+        if (retryCount >= WS_CONFIG.maxRetries) {
+          console.log('Max retries reached, stopping reconnection attempts');
+          cleanup();
           return;
         }
 
@@ -468,7 +491,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       console.error('Error creating WebSocket:', error);
       handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket'));
     }
-  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser]);
+  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, retryCount]);
 
   useEffect(() => {
     connectWebSocket();
