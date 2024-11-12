@@ -49,12 +49,12 @@ class ProgressTracker extends EventEmitter {
       return;
     }
 
-    this.wss = new WebSocketServer({ 
+    this.wss = new WebSocketServer({
       server,
       path: '/progress',
-      perMessageDeflate: false
+      clientTracking: true
     });
-    
+
     this.wss.on('connection', async (ws, req) => {
       console.log('New WebSocket connection attempt');
       
@@ -68,6 +68,7 @@ class ProgressTracker extends EventEmitter {
 
         console.log('Client authenticated and connected to progress WebSocket');
         
+        // Set up heartbeat handling
         this.handleHeartbeat(ws);
         
         // Send initial progress state
@@ -130,13 +131,14 @@ class ProgressTracker extends EventEmitter {
       }
     });
 
+    this.wss.on('error', (error) => {
+      console.error('WebSocket server error:', error);
+    });
+
+    // Handle progress updates
     this.on('progress', (update: ProgressUpdate) => {
       this.progressMap.set(update.videoId, update);
       this.broadcast(update);
-    });
-
-    this.wss.on('error', (error) => {
-      console.error('WebSocket server error:', error);
     });
   }
 

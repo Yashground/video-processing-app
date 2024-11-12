@@ -301,6 +301,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimeoutRef = useRef<NodeJS.Timeout>();
   const pingIntervalRef = useRef<NodeJS.Timeout>();
+  const maxRetries = 3;
   const { toast } = useToast();
   
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
@@ -367,11 +368,18 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     setWsRetrying(false);
   };
 
-  const handleWebSocketError = (error: Event | Error) => {
+  const handleWebSocketError = (error: Error | Event) => {
     console.error('WebSocket error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Connection error occurred';
     setWsError(new Error(errorMessage));
     setWsConnected(false);
+
+    // Show error toast with specific message
+    toast({
+      title: "Connection Error",
+      description: errorMessage,
+      variant: "destructive"
+    });
   };
 
   const connectWebSocket = () => {
@@ -382,21 +390,21 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         cleanupWebSocket();
         setWsRetrying(true);
 
-        // Use the current host and protocol for WebSocket connection
+        // Construct WebSocket URL using current host
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/progress`;
-        const ws = new WebSocket(wsUrl, {
-          credentials: 'include' 
-        });
+        
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
+        // Set connection timeout
         const connectionTimeout = setTimeout(() => {
           if (ws.readyState !== WebSocket.OPEN) {
             ws.close();
             reject(new Error('Connection timeout'));
             toast({
               title: "Connection Error",
-              description: "Failed to establish connection with the server. Please try again.",
+              description: "Failed to establish connection. Server might be unavailable.",
               variant: "destructive"
             });
           }
@@ -407,17 +415,16 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           setWsConnected(true);
           setWsRetrying(false);
           setWsError(null);
+          setRetryCount(0); // Reset retry count on successful connection
           
-          // Setup ping interval
+          // Setup heartbeat ping
           pingIntervalRef.current = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: 'ping' }));
             }
           }, 30000);
           
-          // Send initial connection message with videoId
           ws.send(JSON.stringify({ type: 'init', videoId }));
-          
           resolve();
         });
 
@@ -445,7 +452,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
-            handleWebSocketError(error);
+            handleWebSocketError(new Error('Invalid message format'));
           }
         });
 
@@ -457,45 +464,51 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
         ws.addEventListener('close', (event) => {
           clearTimeout(connectionTimeout);
-          console.log('WebSocket closed:', event.code, event.reason);
+          console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
           setWsConnected(false);
           
-          // Only retry if closure wasn't intentional and not unauthorized
-          if (event.code !== 1000 && event.code !== 1001 && event.code !== 1015 && retryCount < 3) {
+          // Implement exponential backoff for reconnection
+          if (event.code !== 1000 && event.code !== 1001 && retryCount < maxRetries) {
             const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
             setWsRetrying(true);
+            setRetryCount(prev => prev + 1);
             
             retryTimeoutRef.current = setTimeout(() => {
-              setRetryCount(count => count + 1);
-              connectWebSocket().catch(console.error);
+              connectWebSocket().catch(error => {
+                console.error('Reconnection failed:', error);
+                if (retryCount >= maxRetries) {
+                  setWsRetrying(false);
+                  toast({
+                    title: "Connection Failed",
+                    description: "Maximum retry attempts reached. Please refresh the page.",
+                    variant: "destructive"
+                  });
+                }
+              });
             }, retryDelay);
-          } else if (retryCount >= 3) {
+          } else if (retryCount >= maxRetries) {
             setWsRetrying(false);
-            setWsError(new Error('Failed to maintain connection to the server'));
+            setWsError(new Error('Maximum retry attempts reached'));
           }
         });
       } catch (error) {
-        console.error('Error establishing WebSocket connection:', error);
+        console.error('Error setting up WebSocket:', error);
         reject(error);
       }
     });
   };
 
-  // WebSocket connection effect
+  // Effect to handle WebSocket connection
   useEffect(() => {
-    if (!videoId) return;
-
-    connectWebSocket().catch((error) => {
-      console.error('Failed to establish WebSocket connection:', error);
-      toast({
-        title: "Connection Error",
-        description: "Failed to connect to the progress tracking server. Please try refreshing the page.",
-        variant: "destructive"
+    if (videoId) {
+      connectWebSocket().catch(error => {
+        console.error('Initial WebSocket connection failed:', error);
       });
-    });
-
-    return cleanupWebSocket;
-  }, [videoId, retryCount]);
+    }
+    return () => {
+      cleanupWebSocket();
+    };
+  }, [videoId]);
 
   const handleRetry = () => {
     setRetryCount(0);
