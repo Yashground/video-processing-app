@@ -1,6 +1,7 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import type { Express } from 'express';
 import type { IncomingMessage, ServerResponse } from 'http';
+import { authenticateWs } from './auth';
 
 export const setupProxy = (app: Express) => {
   const viteProxy = createProxyMiddleware({
@@ -67,14 +68,32 @@ export const setupProxy = (app: Express) => {
     '/src',
     '/__vite_hmr',
     '/.vite',
-    '/node_modules',
-    '/progress'  // Add progress WebSocket path
+    '/node_modules'
   ], viteProxy);
 
   // Handle WebSocket upgrade events
-  app.on('upgrade', (req: any, socket: any, head: any) => {
-    if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite') || req.url?.startsWith('/progress')) {
-      viteProxy.upgrade(req, socket, head);
+  app.on('upgrade', async (req: any, socket: any, head: any) => {
+    try {
+      if (req.url?.startsWith('/progress')) {
+        // Apply authentication before upgrading
+        const isAuthenticated = await authenticateWs(req);
+        if (!isAuthenticated) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+
+        // After authentication, handle the upgrade
+        viteProxy.upgrade(req, socket, head);
+      }
+      
+      if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
+        viteProxy.upgrade(req, socket, head);
+      }
+    } catch (error) {
+      console.error('WebSocket upgrade error:', error);
+      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+      socket.destroy();
     }
   });
 };

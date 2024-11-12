@@ -173,6 +173,120 @@ function TimeSavingEstimate({ wordCount, duration }: { wordCount: number; durati
   );
 }
 
+// Add new grouping utilities
+function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
+  const groups: Subtitle[][] = [];
+  let currentGroup: Subtitle[] = [];
+  let lastEndTime = 0;
+
+  // Helper function to detect topic changes
+  function detectTopicChange(text1: string, text2: string): boolean {
+    const getKeywords = (text: string): Set<string> => {
+      const stopWords = new Set([
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+        'about', 'as', 'into', 'like', 'through', 'after', 'over', 'between', 'out', 'against',
+        'during', 'without', 'before', 'under', 'around', 'among'
+      ]);
+      
+      return new Set(
+        text.toLowerCase()
+          .replace(/[.,!?;:]/g, '')
+          .split(/\s+/)
+          .filter(word => word.length > 3 && !stopWords.has(word))
+      );
+    };
+
+    const keywords1 = getKeywords(text1);
+    const keywords2 = getKeywords(text2);
+    
+    // Calculate Jaccard similarity coefficient
+    const intersection = new Set([...keywords1].filter(x => keywords2.has(x)));
+    const union = new Set([...keywords1, ...keywords2]);
+    
+    return intersection.size / union.size < 0.2; // Less than 20% similarity indicates topic change
+  }
+
+  // Helper function to detect semantic transitions
+  function detectSemanticTransition(text: string): boolean {
+    const transitionPhrases = [
+      'however', 'moreover', 'furthermore', 'in addition', 'consequently',
+      'therefore', 'thus', 'hence', 'as a result', 'in conclusion',
+      'finally', 'to summarize', 'in contrast', 'on the other hand',
+      'alternatively', 'meanwhile', 'subsequently', 'nevertheless',
+      'in fact', 'indeed', 'notably', 'specifically', 'particularly',
+      'for example', 'for instance', 'in other words', 'that is'
+    ];
+
+    const lowercaseText = text.toLowerCase();
+    return transitionPhrases.some(phrase => lowercaseText.startsWith(phrase));
+  }
+
+  for (let i = 0; i < subtitles.length; i++) {
+    const subtitle = subtitles[i];
+    const timeGap = subtitle.start - lastEndTime;
+    const currentText = subtitle.text.trim();
+    const previousText = currentGroup[currentGroup.length - 1]?.text || '';
+
+    // Factors that influence grouping decisions
+    const hasLongPause = timeGap > 2000; // 2 seconds pause
+    const isSemanticTransition = detectSemanticTransition(currentText);
+    const isTopicChange = previousText && detectTopicChange(previousText, currentText);
+    const isEndOfThought = previousText.endsWith('.') || previousText.endsWith('!') || previousText.endsWith('?');
+    const isOptimalGroupSize = currentGroup.length >= 3 && currentGroup.length <= 5;
+
+    const shouldStartNewGroup = 
+      currentGroup.length === 0 ||
+      hasLongPause ||
+      (isEndOfThought && (isSemanticTransition || isTopicChange)) ||
+      (isOptimalGroupSize && isEndOfThought);
+
+    if (shouldStartNewGroup && currentGroup.length > 0) {
+      groups.push([...currentGroup]);
+      currentGroup = [];
+    }
+
+    currentGroup.push(subtitle);
+    lastEndTime = subtitle.end;
+  }
+
+  // Don't forget the last group
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  return groups;
+}
+
+function hasCommonWords(text1: string, text2: string): boolean {
+  const getSignificantWords = (text: string): Set<string> => {
+    const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
+    return new Set(
+      text.toLowerCase()
+        .split(/\s+/)
+        .filter(word => word.length > 3 && !stopWords.has(word))
+    );
+  };
+
+  const words1 = getSignificantWords(text1);
+  const words2 = getSignificantWords(text2);
+  
+  let commonCount = 0;
+  for (const word of words1) {
+    if (words2.has(word)) commonCount++;
+  }
+  
+  // Return true if at least 20% of significant words are common
+  return commonCount >= Math.min(words1.size, words2.size) * 0.2;
+}
+
+function cleanAndJoinText(subtitles: Subtitle[]): string {
+  return subtitles
+    .map(sub => sub.text.trim())
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -187,6 +301,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const wsRef = useRef<WebSocket | null>(null);
   const retryTimeoutRef = useRef<NodeJS.Timeout>();
   const pingIntervalRef = useRef<NodeJS.Timeout>();
+  const maxRetries = 3;
   const { toast } = useToast();
   
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
@@ -223,6 +338,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   );
 
+  // Add unique key generation helper
+  const generateUniqueKey = (videoId: string, timestamp: number) => {
+    return `${videoId}-${timestamp}-${Math.random().toString(36).substr(2, 9)}`;
+  };
+
   useEffect(() => {
     if (subtitles && onTextUpdate) {
       const fullText = subtitles
@@ -232,6 +352,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       onTextUpdate(fullText);
     }
   }, [subtitles, onTextUpdate]);
+
+  // Add authentication check
+  const { data: user, error: authError } = useSWR('/api/user');
+  const isAuthenticated = !!user && !authError;
 
   const cleanupWebSocket = () => {
     if (wsRef.current) {
@@ -248,122 +372,188 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     setWsRetrying(false);
   };
 
-  const handleWebSocketError = (error: Event | Error) => {
+  const handleWebSocketError = (error: Error | Event) => {
     console.error('WebSocket error:', error);
     const errorMessage = error instanceof Error ? error.message : 'Connection error occurred';
     setWsError(new Error(errorMessage));
     setWsConnected(false);
+
+    if (errorMessage.includes('401') || errorMessage.includes('Authentication failed')) {
+      toast({
+        title: "Authentication Error",
+        description: "Please log in to continue.",
+        variant: "destructive"
+      });
+      window.location.href = '/login';
+      return;
+    }
+
+    toast({
+      title: "Connection Error",
+      description: errorMessage,
+      variant: "destructive"
+    });
   };
 
   const connectWebSocket = () => {
     if (!videoId) return Promise.reject(new Error('No video ID provided'));
+    if (!isAuthenticated) return Promise.reject(new Error('Authentication required'));
     
     return new Promise<void>((resolve, reject) => {
       try {
         cleanupWebSocket();
         setWsRetrying(true);
 
-        // Use port 5000 explicitly since that's where our server is running
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/progress`;
+        // Use absolute path for WebSocket URL
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/progress`;
+        
+        console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
+        // Set connection timeout
         const connectionTimeout = setTimeout(() => {
           if (ws.readyState !== WebSocket.OPEN) {
+            console.error('WebSocket connection timeout');
             ws.close();
             reject(new Error('Connection timeout'));
           }
-        }, 5000);
+        }, 15000);
 
-        ws.onopen = () => {
+        ws.addEventListener('open', () => {
+          console.log('WebSocket connection established');
           clearTimeout(connectionTimeout);
           setWsConnected(true);
           setWsRetrying(false);
           setWsError(null);
-          
-          // Setup ping interval
+          setRetryCount(0);
+
+          // Setup heartbeat ping
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+          }
+
           pingIntervalRef.current = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send('ping');
-            }
-          }, 30000);
-          
-          // Send initial connection message with videoId
-          ws.send(JSON.stringify({ type: 'init', videoId }));
-          
-          resolve();
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const update: ProgressUpdate = JSON.parse(event.data);
-            if (update.videoId === videoId) {
-              if (update.error) {
-                setWsError(new Error(update.error));
-                toast({
-                  title: "Processing Error",
-                  description: update.error,
-                  variant: "destructive"
-                });
-              } else {
-                setProgress(update.progress);
-                setProgressMessage(update.message || "");
-                setProgressStage(update.stage);
-                setProgressSubstage(update.substage || "");
-                setWsError(null);
+              try {
+                ws.send(JSON.stringify({
+                  type: 'ping',
+                  videoId,
+                  timestamp: Date.now()
+                }));
+              } catch (error) {
+                console.error('Error sending heartbeat:', error);
+                handleWebSocketError(error as Error);
               }
+            }
+          }, 10000);
+
+          // Send initialization message
+          try {
+            ws.send(JSON.stringify({
+              type: 'init',
+              videoId,
+              timestamp: Date.now()
+            }));
+            resolve();
+          } catch (error) {
+            console.error('Error sending init message:', error);
+            reject(error);
+          }
+        });
+
+        ws.addEventListener('message', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'error') {
+              handleWebSocketError(new Error(data.message));
+              return;
+            }
+
+            if (data.type === 'auth_required') {
+              window.location.href = '/login';
+              return;
+            }
+
+            if (data.type === 'progress' && data.videoId === videoId) {
+              if (data.error) {
+                handleWebSocketError(new Error(data.error));
+                return;
+              }
+              setProgress(data.progress);
+              setProgressMessage(data.message || '');
+              setProgressStage(data.stage || '');
+              setProgressSubstage(data.substage || '');
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
-            handleWebSocketError(error);
           }
-        };
+        });
 
-        ws.onerror = handleWebSocketError;
-
-        ws.onclose = (event) => {
+        ws.addEventListener('close', (event) => {
+          console.log('WebSocket connection closed:', event.code, event.reason);
           clearTimeout(connectionTimeout);
-          console.log('WebSocket closed:', event.code, event.reason);
+          
+          // Clean up existing intervals
+          if (pingIntervalRef.current) {
+            clearInterval(pingIntervalRef.current);
+          }
+          
           setWsConnected(false);
           
-          // Only retry if closure wasn't intentional
-          if (event.code !== 1000 && retryCount < 3) {
-            const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
-            setWsRetrying(true);
-            
-            retryTimeoutRef.current = setTimeout(() => {
-              setRetryCount(count => count + 1);
-              connectWebSocket().catch(reject);
-            }, retryDelay);
-          } else if (retryCount >= 3) {
-            setWsRetrying(false);
-            setWsError(new Error('Failed to maintain connection to the server'));
-            reject(new Error('Maximum retry attempts reached'));
+          // Handle abnormal closure with exponential backoff
+          if (event.code === 1006 || event.code === 1001) {
+            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+            if (retryCount < maxRetries) {
+              console.log(`Retrying connection in ${backoffDelay}ms (attempt ${retryCount + 1}/${maxRetries})`);
+              setWsRetrying(true);
+              setRetryCount(prev => prev + 1);
+              
+              if (retryTimeoutRef.current) {
+                clearTimeout(retryTimeoutRef.current);
+              }
+              
+              retryTimeoutRef.current = setTimeout(() => {
+                connectWebSocket().catch((error) => {
+                  console.error('Retry failed:', error);
+                  handleWebSocketError(error);
+                });
+              }, backoffDelay);
+            } else {
+              setWsError(new Error('Maximum retry attempts reached'));
+              setWsRetrying(false);
+            }
           }
-        };
+        });
+
+        ws.addEventListener('error', (error) => {
+          console.error('WebSocket error:', error);
+          clearTimeout(connectionTimeout);
+          handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection failed'));
+          reject(error);
+        });
+
       } catch (error) {
-        console.error('Error establishing WebSocket connection:', error);
+        console.error('Error setting up WebSocket:', error);
         reject(error);
       }
     });
   };
 
-  // WebSocket connection effect
+  // Connect WebSocket when component mounts or videoId changes
   useEffect(() => {
-    if (!videoId) return;
-
-    connectWebSocket().catch((error) => {
-      console.error('Failed to establish WebSocket connection:', error);
-      toast({
-        title: "Connection Error",
-        description: "Failed to connect to the progress tracking server. Please try refreshing the page.",
-        variant: "destructive"
+    if (videoId && isAuthenticated) {
+      connectWebSocket().catch((error) => {
+        console.error('Initial WebSocket connection failed:', error);
       });
-    });
+    }
 
-    return cleanupWebSocket;
-  }, [videoId, retryCount]);
+    return () => {
+      cleanupWebSocket();
+    };
+  }, [videoId, isAuthenticated]);
 
   const handleRetry = () => {
     setRetryCount(0);
@@ -437,6 +627,34 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       hover:border-primary/20
       hover:shadow-sm
       hover:translate-x-1
+      relative
+      before:content-['']
+      before:absolute
+      before:left-0
+      before:top-0
+      before:w-1
+      before:h-full
+      before:bg-primary/10
+      before:rounded-l-lg
+      before:transition-all
+      before:duration-300
+      hover:before:bg-primary/30
+    `,
+    paragraphGroup: `
+      relative
+      space-y-6
+      rounded-xl
+      bg-background/50
+      p-6
+      backdrop-blur-sm
+      transition-all
+      duration-300
+      hover:bg-background/70
+      border
+      border-border/5
+      hover:border-border/20
+      shadow-sm
+      hover:shadow-md
     `,
     section: "rounded-lg bg-card/50 p-8 shadow-sm border border-border/10 backdrop-blur-sm hover:bg-card/60 transition-colors duration-300",
     headingLarge: "text-2xl font-semibold mb-6 text-foreground/90 tracking-tight",
@@ -465,6 +683,28 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
+
+  // Update subtitle rendering to use unique keys
+  const renderSubtitles = () => {
+    if (!subtitles) return null;
+
+    const groups = groupSentencesByContext(subtitles);
+    return groups.map((group, groupIndex) => (
+      <div 
+        key={generateUniqueKey(videoId!, groupIndex)} 
+        className="mb-4 p-4 rounded-lg bg-card"
+      >
+        {group.map((subtitle, index) => (
+          <div 
+            key={generateUniqueKey(videoId!, subtitle.start)} 
+            className="text-card-foreground"
+          >
+            {subtitle.text}
+          </div>
+        ))}
+      </div>
+    ));
   };
 
   return (
@@ -545,16 +785,18 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               </div>
             ) : subtitles && subtitles.length > 0 ? (
               <div className={textStyles.container}>
-                <div className={textStyles.textContainer}>
-                  {subtitles.map((subtitle, index) => (
-                    <div key={subtitle.start} className={textStyles.paragraph}>
-                      <span className={textStyles.timestamp}>
-                        {formatTimestamp(subtitle.start)}
-                      </span>
-                      {subtitle.text}
-                    </div>
-                  ))}
+                <div className="flex items-center justify-between mb-8">
+                  {/* Previous header content */}
                 </div>
+
+                <ScrollArea className="h-[600px] rounded-lg border bg-background/50 backdrop-blur-sm">
+                  <div className={textStyles.textContainer}>
+                    {renderSubtitles()}
+                  </div>
+                  {wordCount > 0 && videoDuration > 0 && (
+                    <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
+                  )}
+                </ScrollArea>
               </div>
             ) : (
               <div className="p-8 text-center text-muted-foreground">

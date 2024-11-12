@@ -4,13 +4,14 @@ import { db } from "../db";
 import { subtitles } from "../db/schema";
 import { eq, desc, sum } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
-import { mkdir, unlink } from "fs/promises";
+import { mkdir, unlink, access } from "fs/promises";
 import { join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { OpenAI } from "openai";
 import { VideoCache } from "./lib/cache";
 import { AppError, handleError, withErrorHandler, retryOperation } from "./lib/error";
+import { constants } from "fs";
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -308,14 +309,22 @@ export function registerRoutes(app: Express) {
         title: metadata.title,
         thumbnailUrl: metadata.thumbnailUrl,
         timeSaved: index === 0 ? timeSaved : 0,
-        userId: req.user!.id  // Add the user_id from the authenticated session
+        userId: req.user!.id
       }));
 
       await db.insert(subtitles).values(subtitlesWithMetadata);
       res.json(subtitlesWithMetadata);
     } finally {
       if (audioPath) {
-        await unlink(audioPath).catch(console.error);
+        try {
+          // Check if file exists before attempting to delete
+          await access(audioPath, constants.F_OK);
+          await unlink(audioPath);
+        } catch (error) {
+          if (error.code !== 'ENOENT') {
+            console.error('Error cleaning up audio file:', error);
+          }
+        }
       }
     }
   }));

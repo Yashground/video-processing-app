@@ -200,9 +200,9 @@ export default function HistorySidebar({ onVideoSelect, selectedVideoId, classNa
       </div>
       <ScrollArea className="h-[calc(100vh-7rem)]">
         <div className="p-4 space-y-3">
-          {data?.videos?.map((video) => (
+          {data?.videos?.map((video, index) => (
             <Card
-              key={`${video.videoId}-${video.createdAt ? new Date(video.createdAt).getTime() : Date.now()}-${Math.random().toString(36).substr(2, 9)}`}
+              key={`${video.videoId}-${index}-${Date.parse(video.createdAt)}`}
               className={cn(
                 "p-4 transition-all duration-200",
                 "hover:bg-primary/5 hover:shadow-sm",
