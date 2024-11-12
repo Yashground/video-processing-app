@@ -380,7 +380,9 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         // Use the current host and protocol for WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/progress`;
-        const ws = new WebSocket(wsUrl);
+        const ws = new WebSocket(wsUrl, {
+          credentials: 'include' 
+        });
         wsRef.current = ws;
 
         const connectionTimeout = setTimeout(() => {
