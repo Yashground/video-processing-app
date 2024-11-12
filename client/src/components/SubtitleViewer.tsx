@@ -305,8 +305,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const maxRetries = 5;
   const reconnectDelay = 2000;
 
-  // Add SWR hook for subtitles data
-  const { data: subtitles, error: subtitlesError, isValidating } = useSWR(
+  // Add SWR hook for subtitles data with proper error handling
+  const { data: subtitles, error: subtitlesError, isValidating } = useSWR<Subtitle[]>(
     videoId ? `/api/subtitles/${videoId}` : null
   );
 
@@ -337,7 +337,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const isAuthenticated = !!user && !authError;
 
   const handleReconnect = useCallback(() => {
-    if (!wsRef.current || retryCount >= maxRetries) return;
+    if (!wsRef.current || retryCount >= maxRetries) {
+      setWsRetrying(false);
+      return;
+    }
     
     setWsRetrying(true);
     const delay = Math.min(reconnectDelay * Math.pow(2, retryCount), WS_CONFIG.maxReconnectionDelay);
@@ -368,118 +371,133 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   }, []);
 
+  const getWebSocketUrl = useCallback(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const isProd = process.env.NODE_ENV === 'production';
+    const port = isProd ? '' : ':5000';
+    return `${protocol}//${host}${port}/api/ws/progress`;
+  }, []);
+
   const connectWebSocket = useCallback(() => {
     if (!videoId || !isAuthenticated || wsRef.current) return;
 
     cleanup();
 
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/progress`;
-    
+    const wsUrl = getWebSocketUrl();
     console.log('Connecting to WebSocket:', wsUrl);
     
-    const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
-    wsRef.current = ws;
+    try {
+      const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
+      wsRef.current = ws;
 
-    const pingInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
-        } catch (err) {
-          console.error('Ping error:', err);
-          clearInterval(pingInterval);
-          handleReconnect();
-        }
-      } else {
-        clearInterval(pingInterval);
-      }
-    }, WS_CONFIG.heartbeatInterval);
-
-    ws.addEventListener('open', () => {
-      console.log('WebSocket connection established');
-      setWsConnected(true);
-      setWsRetrying(false);
-      setWsError(null);
-      setRetryCount(0);
-
-      try {
-        ws.send(JSON.stringify({
-          type: 'init',
-          videoId,
-          timestamp: Date.now()
-        }));
-      } catch (err) {
-        handleWebSocketError(err instanceof Error ? err : new Error('Failed to initialize WebSocket'));
-      }
-    });
-
-    ws.addEventListener('message', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        
-        if (data.type === 'error') {
-          handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
-          return;
-        }
-
-        if (data.type === 'auth_required') {
-          console.log('Authentication refresh required');
-          mutateUser().then(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.reconnect();
-            }
-          });
-          return;
-        }
-
-        if (data.type === 'progress' && data.videoId === videoId) {
-          setProgress(data.progress);
-          setProgressStage(data.stage);
-          setProgressMessage(data.message || "");
-          setProgressSubstage(data.substage || "");
-          
-          if (data.error) {
-            handleWebSocketError(new Error(data.error));
-          }
-        }
-      } catch (err) {
-        console.error('Error handling WebSocket message:', err);
-      }
-    });
-
-    ws.addEventListener('close', (event) => {
-      console.log('WebSocket connection closed:', event.code, event.reason);
-      setWsConnected(false);
-      clearInterval(pingInterval);
-      
-      if (event.code === 1000) {
-        console.log('WebSocket closed normally');
-        return;
-      }
-
-      handleReconnect();
-    });
-
-    ws.addEventListener('error', (event) => {
-      console.error('WebSocket error:', event);
-      setWsConnected(false);
-
-      if (event instanceof Error && event.message.includes('401')) {
-        mutateUser().then(() => {
-          if (retryCount < maxRetries) {
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+          } catch (err) {
+            console.error('Ping error:', err);
+            clearInterval(pingInterval);
             handleReconnect();
           }
-        });
-      } else {
-        handleReconnect();
-      }
-    });
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, WS_CONFIG.heartbeatInterval);
 
-    return () => {
-      clearInterval(pingInterval);
-      cleanup();
-    };
-  }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser, handleWebSocketError, cleanup]);
+      ws.addEventListener('open', () => {
+        console.log('WebSocket connection established');
+        setWsConnected(true);
+        setWsRetrying(false);
+        setWsError(null);
+        setRetryCount(0);
+
+        try {
+          ws.send(JSON.stringify({
+            type: 'init',
+            videoId,
+            timestamp: Date.now()
+          }));
+        } catch (err) {
+          handleWebSocketError(err instanceof Error ? err : new Error('Failed to initialize WebSocket'));
+        }
+      });
+
+      ws.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'error') {
+            handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
+            return;
+          }
+
+          if (data.type === 'auth_required') {
+            console.log('Authentication refresh required');
+            mutateUser().then(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.reconnect();
+              }
+            });
+            return;
+          }
+
+          if (data.type === 'progress' && data.videoId === videoId) {
+            setProgress(data.progress);
+            setProgressStage(data.stage);
+            setProgressMessage(data.message || "");
+            setProgressSubstage(data.substage || "");
+            
+            if (data.error) {
+              handleWebSocketError(new Error(data.error));
+            }
+          }
+        } catch (err) {
+          console.error('Error handling WebSocket message:', err);
+        }
+      });
+
+      ws.addEventListener('close', (event) => {
+        console.log('WebSocket connection closed:', event.code, event.reason);
+        setWsConnected(false);
+        clearInterval(pingInterval);
+        
+        if (event.code === 1000) {
+          console.log('WebSocket closed normally');
+          return;
+        }
+
+        handleReconnect();
+      });
+
+      ws.addEventListener('error', (event) => {
+        console.error('WebSocket error:', event);
+        setWsConnected(false);
+        clearInterval(pingInterval);
+
+        if (event instanceof Error) {
+          if (event.message.includes('401')) {
+            mutateUser().then(() => {
+              if (retryCount < maxRetries) {
+                handleReconnect();
+              }
+            });
+          } else {
+            handleWebSocketError(event);
+          }
+        }
+        handleReconnect();
+      });
+
+      return () => {
+        clearInterval(pingInterval);
+        cleanup();
+      };
+    } catch (error) {
+      handleWebSocketError(error instanceof Error ? error : new Error('Failed to establish WebSocket connection'));
+      return () => cleanup();
+    }
+  }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser, handleWebSocketError, cleanup, getWebSocketUrl]);
 
   useEffect(() => {
     if (videoId && isAuthenticated) {
@@ -494,7 +512,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   useEffect(() => {
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
       console.error('Unhandled promise rejection:', event.reason);
-      handleWebSocketError(new Error('Network error occurred'));
+      const error = event.reason instanceof Error ? event.reason : new Error('Network error occurred');
+      handleWebSocketError(error);
       event.preventDefault();
     };
 
@@ -513,6 +532,17 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       onTextUpdate(fullText);
     }
   }, [subtitles, onTextUpdate]);
+
+  const handleRetry = useCallback(() => {
+    setRetryCount(0);
+    setProgress(0);
+    setProgressMessage("");
+    setProgressStage("");
+    setProgressSubstage("");
+    setWsError(null);
+    cleanup();
+    connectWebSocket();
+  }, [cleanup, connectWebSocket]);
 
   if (!videoId) {
     return null;
@@ -537,13 +567,13 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           <ConnectionStatus
             connected={wsConnected}
             retrying={wsRetrying}
-            onRetry={connectWebSocket}
+            onRetry={handleRetry}
           />
           {subtitles?.[0]?.language && (
             <div className="flex items-center gap-2">
               <Globe className="h-4 w-4 text-muted-foreground" />
               <span className="text-sm text-muted-foreground">
-                {getLanguageName(subtitles[0].language)}
+                {languageNames[subtitles[0].language.toLowerCase()] || subtitles[0].language}
               </span>
             </div>
           )}
@@ -551,24 +581,12 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
         {subtitles && !subtitlesError && !isValidating && (
           <ScrollArea className="h-[calc(100vh-15rem)]">
-            <div className="p-6 animate-fade-in">
-              <div className="mb-6 space-y-4">
-                {/* Previous header content */}
-              </div>
-              <div className={textStyles.container}>
-                <div className="flex items-center justify-between mb-8">
-                  {/* Previous header content */}
+            <div className="p-6 space-y-4">
+              {subtitles.map((subtitle, index) => (
+                <div key={`${subtitle.start}-${index}`} className="text-card-foreground">
+                  {subtitle.text}
                 </div>
-
-                <ScrollArea className="h-[600px] rounded-lg border bg-background/50 backdrop-blur-sm">
-                  <div className={textStyles.textContainer}>
-                    {renderSubtitles()}
-                  </div>
-                  {wordCount > 0 && videoDuration > 0 && (
-                    <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
-                  )}
-                </ScrollArea>
-              </div>
+              ))}
             </div>
           </ScrollArea>
         )}
@@ -604,11 +622,6 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               <Loader2 className="h-4 w-4 animate-spin" />
               <span>Loading subtitles...</span>
             </div>
-          ) : subtitles && subtitles.length > 0 ? (
-            <TimeSavingEstimate
-              wordCount={wordCount}
-              duration={videoDuration}
-            />
           ) : null}
         </div>
       </div>
