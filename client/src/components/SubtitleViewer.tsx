@@ -407,10 +407,15 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   // Update the getWebSocketUrl function
   const getWebSocketUrl = () => {
+    // For Replit deployment
+    if (window.location.hostname.endsWith('.repl.co') || window.location.hostname.endsWith('.replit.dev')) {
+      return `wss://${window.location.host}/api/ws/progress`;
+    }
+    
+    // For local development
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname;
-    const defaultPort = '5000';
-    const port = import.meta.env?.DEV ? `:${defaultPort}` : (window.location.port ? `:${window.location.port}` : '');
+    const port = import.meta.env?.DEV ? ':5000' : (window.location.port ? `:${window.location.port}` : '');
     return `${protocol}//${host}${port}/api/ws/progress`;
   };
 
@@ -483,68 +488,63 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           }
         });
 
-        ws.addEventListener('message', (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            
-            if (data.type === 'error') {
-              handleWebSocketError(new Error(data.message));
-              return;
-            }
-
-            if (data.type === 'auth_required') {
-              window.location.href = '/login';
-              return;
-            }
-
-            if (data.type === 'progress') {
-              if (data.error) {
-                handleWebSocketError(new Error(data.error));
-                return;
-              }
-              setProgress(data.progress || 0);
-              setProgressMessage(data.message || '');
-              setProgressStage(data.stage || '');
-              setProgressSubstage(data.substage || '');
-            }
-
-            // Handle pong messages
-            if (data.type === 'pong') {
-              console.log('[WebSocket] Received pong');
-            }
-          } catch (error) {
-            console.error('[WebSocket] Error parsing message:', error);
-          }
-        });
-
         ws.addEventListener('close', (event) => {
           console.log(`[WebSocket] Connection closed: ${event.code} - ${event.reason}`);
           clearTimeout(connectionTimeout);
           setWsConnected(false);
-          
-          if (!event.wasClean) {
-            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
-            if (retryCount < maxRetries) {
-              console.log(`[WebSocket] Retrying in ${backoffDelay}ms (attempt ${retryCount + 1}/${maxRetries})`);
-              setWsRetrying(true);
+
+          // Don't retry if it was a normal closure or auth failure
+          if (event.code === 1000 || event.code === 1008) {
+            setWsRetrying(false);
+            return;
+          }
+
+          // Implement exponential backoff for retries
+          if (retryCount < maxRetries) {
+            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 10000);
+            console.log(`[WebSocket] Retrying in ${backoffDelay}ms (attempt ${retryCount + 1}/${maxRetries})`);
+            
+            retryTimeoutRef.current = setTimeout(() => {
               setRetryCount(prev => prev + 1);
-              retryTimeoutRef.current = setTimeout(() => {
-                connectWebSocket().catch(error => {
+              connectWebSocket()
+                .catch(error => {
                   console.error('[WebSocket] Retry failed:', error);
+                  setWsRetrying(false);
                 });
-              }, backoffDelay);
-            } else {
-              setWsRetrying(false);
-              handleWebSocketError(new Error('Max retry attempts reached'));
-            }
+            }, backoffDelay);
+          } else {
+            console.error('[WebSocket] Max retries reached');
+            setWsRetrying(false);
+            reject(new Error('Connection failed after maximum retries'));
           }
         });
 
-        ws.addEventListener('error', (error) => {
-          console.error('[WebSocket] Error:', error);
-          clearTimeout(connectionTimeout);
-          handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection failed'));
-          reject(error);
+        ws.addEventListener('error', (event) => {
+          console.error('[WebSocket] Error:', event);
+          handleWebSocketError(event);
+        });
+
+        ws.addEventListener('message', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+          
+            if (data.type === 'progress' && data.videoId === videoId) {
+              setProgress(data.progress || 0);
+              setProgressMessage(data.message || '');
+              setProgressStage(data.stage || '');
+              setProgressSubstage(data.substage || '');
+              
+              if (data.error) {
+                toast({
+                  title: "Processing Error",
+                  description: data.error,
+                  variant: "destructive"
+                });
+              }
+            }
+          } catch (error) {
+            console.error('[WebSocket] Error parsing message:', error);
+          }
         });
 
       } catch (error) {
