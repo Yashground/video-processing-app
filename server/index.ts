@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { progressTracker } from "./lib/progress";
 import { setupAuth } from "./auth";
 import { setupProxy } from "./proxy";
+import { authenticateWs } from "./auth";
 
 const app = express();
 
@@ -16,13 +17,13 @@ const errorHandler = (err: any, _req: Request, res: Response, _next: NextFunctio
   res.status(status).json({ message });
 };
 
-// Proper CORS setup
+// WebSocket CORS setup
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
     res.header('Access-Control-Allow-Origin', origin);
     res.header('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
     res.header('Access-Control-Allow-Credentials', 'true');
   }
   if (req.method === 'OPTIONS') {
@@ -37,11 +38,11 @@ app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
 // Create server with proper timeouts
 const server = createServer(app);
-server.keepAliveTimeout = 65000; // Slightly higher than 60 seconds
-server.headersTimeout = 66000; // Slightly higher than keepAliveTimeout
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 
-// Initialize WebSocket for progress tracking
-progressTracker.initializeWebSocket(server);
+// Initialize WebSocket for progress tracking with authentication
+progressTracker.initializeWebSocket(server, authenticateWs);
 
 // Setup authentication first
 setupAuth(app);

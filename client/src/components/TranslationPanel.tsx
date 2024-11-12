@@ -33,9 +33,39 @@ const SUPPORTED_LANGUAGES = {
 };
 
 const textStyles = {
-  container: "px-6 py-4 space-y-4",
-  paragraph: "leading-7 tracking-wide text-base text-foreground/90",
-  textContainer: "prose prose-zinc dark:prose-invert max-w-none"
+  container: "px-8 py-6 space-y-8",
+  textContainer: `
+    prose 
+    prose-zinc 
+    dark:prose-invert 
+    max-w-none 
+    space-y-6
+    [&>*]:transition-all
+    [&>*]:duration-200
+  `,
+  paragraph: `
+    mb-8
+    leading-[1.9]
+    tracking-wide
+    text-base
+    text-foreground/90
+    first-letter:text-lg
+    first-letter:font-medium
+    first-line:leading-[2]
+    indent-6
+    hover:bg-primary/5
+    rounded-lg
+    p-4
+    transition-all
+    duration-200
+    border-l-2
+    border-transparent
+    hover:border-primary/20
+  `,
+  section: "rounded-lg bg-card/50 p-6 shadow-sm border border-border/10 backdrop-blur-sm",
+  headingLarge: "text-2xl font-semibold mb-4 text-foreground/90",
+  headingMedium: "text-xl font-medium mb-3 text-foreground/80",
+  sectionDivider: "my-8 border-t border-border/40 w-1/3 mx-auto opacity-50",
 };
 
 export default function TranslationPanel({ text }: TranslationPanelProps) {
@@ -73,18 +103,21 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
 
   if (!text) {
     return (
-      <div className="p-8 text-center text-muted-foreground text-lg">
-        Enter a YouTube URL above to extract audio and translate the content
+      <div className="p-8 text-center text-muted-foreground">
+        <p className="text-lg mb-4">✨ Translate content to any language</p>
+        <p className="text-sm text-muted-foreground">
+          Enter a YouTube URL above to extract audio and translate the content
+        </p>
       </div>
     );
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className={textStyles.container}>
+      <div className="flex items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-2">
           <Globe className="h-5 w-5 text-primary" />
-          <h3 className="text-xl font-semibold">Translation</h3>
+          <h3 className={textStyles.headingMedium}>Translation</h3>
         </div>
         <div className="flex items-center gap-4">
           <Select
@@ -119,26 +152,31 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
         </div>
       </div>
 
-      <ScrollArea className="h-[300px] rounded-lg border bg-card">
+      <ScrollArea className="h-[300px] rounded-lg border bg-background/50 backdrop-blur-sm">
         {error ? (
-          <Alert variant="destructive" className="m-4">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Translation Failed</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
+          <div className={textStyles.section}>
+            <Alert variant="destructive" className="border-destructive/50 bg-destructive/10">
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle className="font-semibold">Translation Failed</AlertTitle>
+              <AlertDescription className="mt-2">{error}</AlertDescription>
+            </Alert>
+          </div>
         ) : translatedText ? (
           <div className={textStyles.container}>
             <div className={textStyles.textContainer}>
               {translatedText.split('\n\n').map((paragraph, index) => (
-                <p key={index} className={textStyles.paragraph}>
+                <div key={index} className={textStyles.paragraph}>
                   {paragraph}
-                </p>
+                </div>
               ))}
             </div>
           </div>
         ) : (
           <div className="p-8 text-center text-muted-foreground">
-            Select a target language and click Translate to begin
+            <p className="text-lg mb-2">Select a target language and click Translate</p>
+            <p className="text-sm text-muted-foreground">
+              The translated text will appear here
+            </p>
           </div>
         )}
       </ScrollArea>

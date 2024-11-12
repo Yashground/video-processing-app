@@ -1,6 +1,6 @@
 import passport from "passport";
 import { IVerifyOptions, Strategy as LocalStrategy } from "passport-local";
-import { type Express } from "express";
+import { type Express, Request } from "express";
 import session from "express-session";
 import createMemoryStore from "memorystore";
 import { scrypt, randomBytes, timingSafeEqual } from "crypto";
@@ -33,6 +33,56 @@ declare global {
     interface User extends SelectUser {}
   }
 }
+
+export interface AuthenticatedRequest extends Request {
+  user?: Express.User;
+  session: session.Session & { userId?: number };
+}
+
+export const authenticateWs = async (request: any): Promise<AuthenticatedRequest | false> => {
+  try {
+    if (!request.headers.cookie) {
+      return false;
+    }
+
+    const cookies = request.headers.cookie.split(';').reduce((acc: { [key: string]: string }, cookie: string) => {
+      const [key, value] = cookie.trim().split('=');
+      acc[key] = decodeURIComponent(value);
+      return acc;
+    }, {});
+
+    const sessionId = cookies['watch-hour-session'];
+    if (!sessionId) {
+      return false;
+    }
+
+    const sessionStore = new (createMemoryStore(session))();
+    const sessionData = await new Promise((resolve) => {
+      sessionStore.get(sessionId, (err, session) => {
+        resolve(session);
+      });
+    });
+
+    if (!sessionData || !sessionData.userId) {
+      return false;
+    }
+
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, sessionData.userId))
+      .limit(1);
+
+    if (!user) {
+      return false;
+    }
+
+    return { ...request, user, session: sessionData } as AuthenticatedRequest;
+  } catch (error) {
+    console.error('WebSocket authentication error:', error);
+    return false;
+  }
+};
 
 export function setupAuth(app: Express) {
   const MemoryStore = createMemoryStore(session);

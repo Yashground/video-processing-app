@@ -263,8 +263,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         cleanupWebSocket();
         setWsRetrying(true);
 
+        // Use port 5000 explicitly since that's where our server is running
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${window.location.host}/progress`);
+        const wsUrl = `${protocol}//${window.location.host}/progress`;
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         const connectionTimeout = setTimeout(() => {
@@ -286,6 +288,9 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               ws.send('ping');
             }
           }, 30000);
+          
+          // Send initial connection message with videoId
+          ws.send(JSON.stringify({ type: 'init', videoId }));
           
           resolve();
         };
@@ -400,16 +405,70 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   }
 
   const textStyles = {
-    paragraph: "mb-4 leading-7 tracking-wide text-base text-foreground/90",
-    timestamp: "text-xs text-muted-foreground",
-    container: "px-6 py-4 space-y-4",
-    textContainer: "prose prose-zinc dark:prose-invert max-w-none",
+    container: "px-8 py-6 space-y-8",
+    textContainer: `
+      prose 
+      prose-zinc 
+      dark:prose-invert 
+      max-w-none 
+      space-y-6
+      [&>*]:transition-all
+      [&>*]:duration-200
+    `,
+    paragraph: `
+      relative
+      group
+      mb-8
+      leading-[1.9]
+      tracking-wide
+      text-base
+      text-foreground/90
+      first-letter:text-lg
+      first-letter:font-medium
+      first-line:leading-[2]
+      indent-6
+      hover:bg-primary/5
+      rounded-lg
+      p-4
+      transition-all
+      duration-200
+      border-l-2
+      border-transparent
+      hover:border-primary/20
+    `,
+    sectionDivider: "my-8 border-t border-border/40 w-1/3 mx-auto opacity-50",
+    timestamp: `
+      absolute 
+      -left-2 
+      top-1/2 
+      -translate-y-1/2
+      px-2 
+      py-1 
+      text-xs 
+      font-mono 
+      text-muted-foreground/60
+      opacity-0
+      group-hover:opacity-100
+      transition-opacity
+      duration-200
+    `,
+    section: "rounded-lg bg-card/50 p-6 shadow-sm border border-border/10 backdrop-blur-sm",
+    headingLarge: "text-2xl font-semibold mb-4 text-foreground/90 tracking-tight",
+    headingMedium: "text-xl font-medium mb-3 text-foreground/80",
+    groupContainer: "space-y-4 relative",
+  };
+
+  const formatTimestamp = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
   return (
     <ErrorBoundary onError={handleError}>
       <div className="p-6 animate-fade-in">
-        <div className="mb-4 space-y-4">
+        <div className="mb-6 space-y-4">
           <div className="flex items-center justify-between">
             {subtitles?.[0]?.language && (
               <div className="flex items-center gap-2">
@@ -432,19 +491,19 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         </div>
 
         {error || wsError ? (
-          <div className="space-y-6">
+          <div className={textStyles.section}>
             <Alert variant="destructive" className="mb-6 border-destructive/50 bg-destructive/10">
               <AlertCircle className="h-5 w-5" />
-              <AlertTitle className="text-lg font-semibold">
+              <AlertTitle className={textStyles.headingMedium}>
                 {wsError ? "Connection Error" : "Audio Processing Failed"}
               </AlertTitle>
-              <AlertDescription className="mt-2 text-base">
+              <AlertDescription className="mt-2 text-base leading-7">
                 {wsError ? (
                   <p>{wsError.message || "Failed to connect to the server"}</p>
                 ) : (
                   <>
                     We couldn't process the audio because:
-                    <ul className="list-disc list-inside mt-3 space-y-1">
+                    <ul className="list-disc list-inside mt-3 space-y-2">
                       <li>The video might be too long (max 2 hours)</li>
                       <li>The file might be too large (max 100MB)</li>
                       <li>The video might be private or unavailable</li>
@@ -463,51 +522,61 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             </Button>
           </div>
         ) : (
-          <ScrollArea className="h-[500px]">
+          <ScrollArea className="h-[500px] rounded-lg border bg-background/50 backdrop-blur-sm">
             {isValidating ? (
-              <div className="space-y-6">
-                <div className="flex items-center gap-3 text-primary text-lg">
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  {progressMessage || "Processing Audio..."}
+              <div className={textStyles.container}>
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 text-primary text-lg">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    <span>{progressMessage || "Processing audio..."}</span>
+                  </div>
+                  <div className="relative">
+                    <Progress 
+                      value={progress} 
+                      className="h-2 bg-muted transition-all duration-300"
+                    />
+                  </div>
+                  <div className={textStyles.section}>
+                    <ProgressStages stage={progressStage} substage={progressSubstage} />
+                  </div>
                 </div>
-                <div className="relative">
-                  <Progress 
-                    value={progress} 
-                    className="h-2 bg-muted transition-all duration-300"
-                  />
-                </div>
-                <ProgressStages stage={progressStage} substage={progressSubstage} />
               </div>
             ) : subtitles && subtitles.length > 0 ? (
               <div className={textStyles.container}>
-                {/* Smart paragraph grouping based on timing */}
-                {subtitles.reduce((groups: JSX.Element[], subtitle, index) => {
-                  const currentSubtitle = subtitle;
-                  const nextSubtitle = subtitles[index + 1];
-                  const timeBetweenSubtitles = nextSubtitle ? nextSubtitle.start - currentSubtitle.end : 0;
-                  const isNewParagraph = timeBetweenSubtitles > 1500; // 1.5 seconds gap indicates new paragraph
+                <div className={textStyles.textContainer}>
+                  {subtitles.reduce((groups: JSX.Element[], subtitle, index) => {
+                    const currentSubtitle = subtitle;
+                    const nextSubtitle = subtitles[index + 1];
+                    const timeBetweenSubtitles = nextSubtitle ? nextSubtitle.start - currentSubtitle.end : 0;
+                    const isNewSection = timeBetweenSubtitles > 2000; // 2 seconds gap indicates new section
+                    const isNewParagraph = timeBetweenSubtitles > 1000; // 1 second gap indicates new paragraph
 
-                  const formattedTime = new Date(currentSubtitle.start).toISOString().substr(11, 8);
-                  
-                  const element = (
-                    <div key={`${currentSubtitle.start}-${currentSubtitle.end}`} className="group">
-                      <div className={textStyles.paragraph}>
-                        <span className={`${textStyles.timestamp} opacity-0 group-hover:opacity-100 transition-opacity duration-200`}>
-                          [{formattedTime}]
-                        </span>
-                        <span className="ml-2">{currentSubtitle.text}</span>
+                    const formattedTime = formatTimestamp(currentSubtitle.start);
+                    
+                    const element = (
+                      <div 
+                        key={`subtitle-${currentSubtitle.start}-${currentSubtitle.end}-${index}`} 
+                        className={`${textStyles.groupContainer} group`}
+                      >
+                        <div className={textStyles.paragraph}>
+                          <span className={`${textStyles.timestamp} opacity-0 group-hover:opacity-100 transition-opacity duration-200 mr-3`}>
+                            [{formattedTime}]
+                          </span>
+                          <span>{currentSubtitle.text}</span>
+                        </div>
+                        {isNewSection && <div className={textStyles.sectionDivider} />}
+                        {isNewParagraph && !isNewSection && <div className="my-4" />}
                       </div>
-                      {isNewParagraph && <div className="my-6 border-t border-border/40" />}
-                    </div>
-                  );
-                  
-                  groups.push(element);
-                  return groups;
-                }, [])}
+                    );
+                    
+                    groups.push(element);
+                    return groups;
+                  }, [])}
+                </div>
               </div>
             ) : (
-              <div className="p-8 text-center text-muted-foreground text-lg animate-fade-in">
-                <p className="mb-4">✨ Transform YouTube videos into readable text</p>
+              <div className="p-8 text-center text-muted-foreground">
+                <p className="text-lg mb-4">✨ Transform YouTube videos into readable text</p>
                 <p className="text-sm text-muted-foreground">
                   Enter a YouTube URL above to extract audio and generate transcriptions
                 </p>

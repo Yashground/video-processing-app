@@ -67,12 +67,13 @@ export const setupProxy = (app: Express) => {
     '/src',
     '/__vite_hmr',
     '/.vite',
-    '/node_modules'
+    '/node_modules',
+    '/progress'  // Add progress WebSocket path
   ], viteProxy);
 
   // Handle WebSocket upgrade events
   app.on('upgrade', (req: any, socket: any, head: any) => {
-    if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
+    if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite') || req.url?.startsWith('/progress')) {
       viteProxy.upgrade(req, socket, head);
     }
   });
