@@ -5,7 +5,7 @@ import "./index.css";
 import { SWRConfig } from "swr";
 import { fetcher } from "./lib/fetcher";
 import { Toaster } from "@/components/ui/toaster";
-import { Loader2 } from "lucide-react";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import Home from "./pages/Home";
 import { Landing } from "./pages/Landing";
 import { useUser } from "@/hooks/use-user";
@@ -16,10 +16,7 @@ function ProtectedRoute({ component: Component }: { component: React.ComponentTy
   if (isLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="flex items-center gap-2 text-lg font-medium animate-pulse">
-          <Loader2 className="h-5 w-5 animate-spin" />
-          Loading...
-        </div>
+        <LoadingSpinner size="lg" text="Loading your profile..." />
       </div>
     );
   }

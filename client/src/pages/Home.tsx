@@ -13,6 +13,7 @@ import HistorySidebar from "../components/HistorySidebar";
 import { useToast } from "@/hooks/use-toast";
 import { Youtube, LogOut } from "lucide-react";
 import { useUser } from "@/hooks/use-user";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 
 const urlSchema = z.object({
   videoUrl: z.string().url().refine((url) => {
@@ -34,6 +35,7 @@ const urlSchema = z.object({
 export default function Home() {
   const [videoId, setVideoId] = useState<string | null>(null);
   const [transcribedText, setTranscribedText] = useState<string>("");
+  const [isProcessing, setIsProcessing] = useState(false);
   const { toast } = useToast();
   const { user, logout } = useUser();
   
@@ -44,8 +46,9 @@ export default function Home() {
     }
   });
 
-  const onSubmit = (data: z.infer<typeof urlSchema>) => {
+  const onSubmit = async (data: z.infer<typeof urlSchema>) => {
     try {
+      setIsProcessing(true);
       const url = new URL(data.videoUrl);
       let id: string | null = null;
 
@@ -71,20 +74,22 @@ export default function Home() {
         description: "Failed to parse video URL",
         variant: "destructive"
       });
+    } finally {
+      setIsProcessing(false);
     }
   };
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen animate-in slide-in-from-bottom-4 duration-500">
       <HistorySidebar 
         onVideoSelect={setVideoId} 
         selectedVideoId={videoId}
         className="hidden md:block"
       />
       <div className="flex-1 overflow-auto">
-        <div className="container py-6 px-4 space-y-8 animate-fade-in">
+        <div className="container py-6 px-4 space-y-8">
           {/* User Profile Section */}
-          <div className="flex justify-end items-center gap-4">
+          <div className="flex justify-end items-center gap-4 animate-in slide-in-from-top-4 duration-500">
             <span className="text-sm text-muted-foreground">
               Welcome, {user?.username}
             </span>
@@ -93,16 +98,15 @@ export default function Home() {
               size="sm"
               onClick={() => {
                 logout();
-                // Will automatically redirect to landing page due to auth check
               }}
-              className="flex items-center gap-2 hover:bg-destructive/10 hover:text-destructive"
+              className="flex items-center gap-2 hover:bg-destructive/10 hover:text-destructive transition-all duration-300"
             >
               <LogOut className="h-4 w-4" />
               Logout
             </Button>
           </div>
 
-          <Card className="p-8 shadow-lg bg-gradient-to-br from-background via-background to-muted transition-all duration-300 hover:shadow-xl">
+          <Card className="p-8 shadow-lg bg-gradient-to-br from-background via-background to-muted transition-all duration-300 hover:shadow-xl animate-in fade-in-50">
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-4">
                 <FormField
@@ -116,6 +120,7 @@ export default function Home() {
                           <Input 
                             placeholder="Enter YouTube URL (e.g., youtube.com/watch?v=... or youtu.be/...)" 
                             className="h-12 pl-11 pr-4 transition-all duration-200 border-2 hover:border-primary/50 focus:border-primary"
+                            disabled={isProcessing}
                             {...field} 
                           />
                         </div>
@@ -127,27 +132,33 @@ export default function Home() {
                 <Button 
                   type="submit" 
                   size="lg"
+                  disabled={isProcessing}
                   className="h-12 px-8 bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary transition-all duration-300 shadow-lg hover:shadow-xl"
                 >
-                  Process Audio
+                  {isProcessing ? (
+                    <LoadingSpinner size="sm" text="Processing..." />
+                  ) : (
+                    "Process Audio"
+                  )}
                 </Button>
               </form>
             </Form>
           </Card>
 
           <div className="space-y-8">
-            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+            {/* Previous cards with added transitions */}
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl animate-in fade-in-50">
               <SubtitleViewer 
                 videoId={videoId} 
                 onTextUpdate={setTranscribedText}
               />
             </Card>
 
-            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl animate-in fade-in-50">
               <TranslationPanel text={transcribedText} />
             </Card>
 
-            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl">
+            <Card className="shadow-lg overflow-hidden bg-gradient-to-br from-card via-background to-muted transition-all duration-300 hover:shadow-xl animate-in fade-in-50">
               <SummaryPanel text={transcribedText} />
             </Card>
           </div>

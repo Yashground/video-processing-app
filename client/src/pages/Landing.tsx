@@ -3,6 +3,7 @@ import { useUser } from "@/hooks/use-user";
 import { Button } from "@/components/ui/button";
 import { useLocation } from "wouter";
 import { Loader2 } from "lucide-react";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 
 // SVG Components
 const WavePattern = () => (
@@ -61,10 +62,7 @@ export function Landing() {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-pastel-blue via-pastel-blue/50 to-white flex items-center justify-center">
-        <div className="flex items-center gap-2 text-lg font-medium animate-pulse">
-          <Loader2 className="h-5 w-5 animate-spin" />
-          Loading...
-        </div>
+        <LoadingSpinner size="lg" text="Loading..." />
       </div>
     );
   }
@@ -168,10 +166,7 @@ export function Landing() {
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? (
-                    <div className="flex items-center gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      {isLogin ? "Logging in..." : "Creating account..."}
-                    </div>
+                    <LoadingSpinner size="sm" text={isLogin ? "Logging in..." : "Creating account..."} />
                   ) : (
                     isLogin ? "Login" : "Register"
                   )}
