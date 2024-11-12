@@ -6,7 +6,13 @@ import { progressTracker } from "./lib/progress";
 import { setupAuth } from "./auth";
 import { setupProxy } from "./proxy";
 import { authenticateWs } from "./auth";
-import { apiLimiter, processingLimiter } from "./middleware/rate-limit";
+import { 
+  apiLimiter, 
+  processingLimiter, 
+  aiOperationsLimiter,
+  cacheLimiter,
+  wsRateLimit 
+} from "./middleware/rate-limit";
 import { db, checkDBConnection, closePool } from "./lib/db-pool";
 import { VideoCache } from "./lib/cache";
 import cluster from "cluster";
@@ -66,9 +72,13 @@ if (cluster.isPrimary) {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
-  // Apply rate limiting
-  app.use(apiLimiter);
-  app.use('/api/subtitles', processingLimiter);
+  // Apply rate limiting middleware
+  app.use('/api/', apiLimiter); // General API rate limit
+  app.use('/api/subtitles', processingLimiter); // Video processing rate limit
+  app.use('/api/translate', aiOperationsLimiter); // Translation rate limit
+  app.use('/api/summarize', aiOperationsLimiter); // Summarization rate limit
+  app.use('/api/cache', cacheLimiter); // Cache operations rate limit
+  app.use('/api/ws', wsRateLimit); // WebSocket rate limit
   
   // Create server with proper timeouts
   const server = createServer(app);
