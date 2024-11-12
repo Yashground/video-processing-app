@@ -305,9 +305,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const maxRetries = 5;
   const reconnectDelay = 2000;
 
-  // Add SWR hook for subtitles data with proper error handling
-  const { data: subtitles, error: subtitlesError, isValidating } = useSWR<Subtitle[]>(
-    videoId ? `/api/subtitles/${videoId}` : null
+  // Add SWR hook for subtitles data with proper error handling and fallback
+  const { data: subtitles = [], error: subtitlesError, isValidating } = useSWR<Subtitle[]>(
+    videoId ? `/api/subtitles/${videoId}` : null,
+    {
+      fallbackData: [],
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+    }
   );
 
   const handleWebSocketError = useCallback((error: Error) => {
@@ -320,14 +325,13 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     });
   }, [toast]);
 
-  // WebSocket Configuration with improved settings
+  // Updated WebSocket Configuration
   const WS_CONFIG = {
     connectionTimeout: 15000,
     maxRetries: maxRetries,
     minReconnectionDelay: reconnectDelay,
     maxReconnectionDelay: 30000,
     reconnectionDelayGrowFactor: 1.5,
-    heartbeatInterval: 30000,
     debug: process.env.NODE_ENV === 'development',
     timeoutInterval: 10000,
     maxEnqueuedMessages: 100,
@@ -363,20 +367,17 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       clearTimeout(reconnectTimeoutRef.current);
     }
     if (wsRef.current) {
-      const ws = wsRef.current;
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close(1000, "Cleanup");
-      }
+      wsRef.current.close();
       wsRef.current = null;
     }
+    setWsConnected(false);
+    setWsRetrying(false);
   }, []);
 
   const getWebSocketUrl = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    const isProd = process.env.NODE_ENV === 'production';
-    const port = isProd ? '' : ':5000';
-    return `${protocol}//${host}${port}/api/ws/progress`;
+    return `${protocol}//${host}/api/ws/progress`;
   }, []);
 
   const connectWebSocket = useCallback(() => {
@@ -390,20 +391,6 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     try {
       const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
       wsRef.current = ws;
-
-      const pingInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
-          } catch (err) {
-            console.error('Ping error:', err);
-            clearInterval(pingInterval);
-            handleReconnect();
-          }
-        } else {
-          clearInterval(pingInterval);
-        }
-      }, WS_CONFIG.heartbeatInterval);
 
       ws.addEventListener('open', () => {
         console.log('WebSocket connection established');
@@ -460,7 +447,6 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       ws.addEventListener('close', (event) => {
         console.log('WebSocket connection closed:', event.code, event.reason);
         setWsConnected(false);
-        clearInterval(pingInterval);
         
         if (event.code === 1000) {
           console.log('WebSocket closed normally');
@@ -470,161 +456,107 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         handleReconnect();
       });
 
-      ws.addEventListener('error', (event) => {
-        console.error('WebSocket error:', event);
+      ws.addEventListener('error', () => {
         setWsConnected(false);
-        clearInterval(pingInterval);
-
-        if (event instanceof Error) {
-          if (event.message.includes('401')) {
-            mutateUser().then(() => {
-              if (retryCount < maxRetries) {
-                handleReconnect();
-              }
-            });
-          } else {
-            handleWebSocketError(event);
-          }
-        }
         handleReconnect();
       });
 
       return () => {
-        clearInterval(pingInterval);
         cleanup();
       };
     } catch (error) {
-      handleWebSocketError(error instanceof Error ? error : new Error('Failed to establish WebSocket connection'));
-      return () => cleanup();
+      console.error('Error creating WebSocket:', error);
+      handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket'));
     }
-  }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser, handleWebSocketError, cleanup, getWebSocketUrl]);
+  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser]);
 
   useEffect(() => {
-    if (videoId && isAuthenticated) {
-      const cleanup = connectWebSocket();
-      return () => {
-        if (cleanup) cleanup();
-      };
-    }
-  }, [videoId, isAuthenticated, connectWebSocket]);
+    connectWebSocket();
+    return cleanup;
+  }, [connectWebSocket, cleanup]);
 
-  // Handle unhandled promise rejections
+  // Add useEffect for updating text when subtitles change
   useEffect(() => {
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      console.error('Unhandled promise rejection:', event.reason);
-      const error = event.reason instanceof Error ? event.reason : new Error('Network error occurred');
-      handleWebSocketError(error);
-      event.preventDefault();
-    };
-
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    return () => {
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-    };
-  }, [handleWebSocketError]);
-
-  // Update text when subtitles change
-  useEffect(() => {
-    if (subtitles && onTextUpdate) {
-      const fullText = subtitles
-        .map((sub: Subtitle) => sub.text.trim())
-        .join(' ');
+    if (subtitles?.length && onTextUpdate) {
+      const fullText = subtitles.map(s => s.text).join(' ');
       onTextUpdate(fullText);
+      setWordCount(fullText.split(/\s+/).length);
     }
   }, [subtitles, onTextUpdate]);
 
-  const handleRetry = useCallback(() => {
-    setRetryCount(0);
-    setProgress(0);
-    setProgressMessage("");
-    setProgressStage("");
-    setProgressSubstage("");
-    setWsError(null);
-    cleanup();
-    connectWebSocket();
-  }, [cleanup, connectWebSocket]);
-
-  if (!videoId) {
-    return null;
-  }
-
-  if (subtitlesError || wsError) {
+  if (subtitlesError) {
     return (
       <Alert variant="destructive">
         <AlertCircle className="h-5 w-5" />
         <AlertTitle>Error</AlertTitle>
         <AlertDescription>
-          {(subtitlesError || wsError)?.message || "Failed to load subtitles"}
+          Failed to load subtitles. Please try again later.
         </AlertDescription>
       </Alert>
     );
   }
 
-  return (
-    <ErrorBoundary onError={handleWebSocketError}>
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <ConnectionStatus
-            connected={wsConnected}
-            retrying={wsRetrying}
-            onRetry={handleRetry}
-          />
-          {subtitles?.[0]?.language && (
-            <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm text-muted-foreground">
-                {languageNames[subtitles[0].language.toLowerCase()] || subtitles[0].language}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {subtitles && !subtitlesError && !isValidating && (
-          <ScrollArea className="h-[calc(100vh-15rem)]">
-            <div className="p-6 space-y-4">
-              {subtitles.map((subtitle, index) => (
-                <div key={`${subtitle.start}-${index}`} className="text-card-foreground">
-                  {subtitle.text}
-                </div>
-              ))}
-            </div>
-          </ScrollArea>
-        )}
-
-        {(subtitlesError || wsError) && (
-          <Alert variant="destructive">
-            <AlertCircle className="h-5 w-5" />
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>
-              {(subtitlesError || wsError)?.message || "An error occurred"}
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {progressStage && (
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Progress value={progress} />
-              <div className="text-sm text-muted-foreground">
-                {progressMessage}
-              </div>
-            </div>
-            <ProgressStages
-              stage={progressStage}
-              substage={progressSubstage}
-            />
-          </div>
-        )}
-
-        <div className="flex items-center justify-center py-4">
-          {isValidating ? (
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Loading subtitles...</span>
-            </div>
-          ) : null}
-        </div>
+  if (!videoId) {
+    return (
+      <div className="p-8 text-center text-muted-foreground">
+        Enter a YouTube URL to start processing
       </div>
-    </ErrorBoundary>
+    );
+  }
+
+  const subtitleGroups = groupSentencesByContext(subtitles || []);
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-semibold">Video Transcription</h2>
+        <ConnectionStatus 
+          connected={wsConnected} 
+          retrying={wsRetrying}
+          onRetry={connectWebSocket}
+        />
+      </div>
+
+      {progress > 0 && progress < 100 && (
+        <div className="space-y-4">
+          <Progress value={progress} />
+          <ProgressStages stage={progressStage} substage={progressSubstage} />
+        </div>
+      )}
+
+      {isValidating && !subtitles?.length ? (
+        <div className="flex items-center justify-center p-8">
+          <Loader2 className="h-8 w-8 animate-spin" />
+        </div>
+      ) : subtitles?.length > 0 ? (
+        <>
+          {wordCount > 0 && videoDuration > 0 && (
+            <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
+          )}
+          <ScrollArea className="h-[600px] rounded-md border p-4">
+            {subtitleGroups.map((group, groupIndex) => (
+              <div 
+                key={groupIndex} 
+                className="mb-6 p-4 rounded-lg bg-muted/50 hover:bg-muted/70 transition-colors"
+              >
+                {group.map((subtitle, index) => (
+                  <div key={index} className="mb-2">
+                    <div className="text-base leading-relaxed">
+                      {subtitle.text}
+                      {subtitle.language && (
+                        <Badge variant="outline" className="ml-2">
+                          <Globe className="h-3 w-3 mr-1" />
+                          {languageNames[subtitle.language] || subtitle.language}
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </ScrollArea>
+        </>
+      ) : null}
+    </div>
   );
 }
