@@ -2,13 +2,14 @@ import { rateLimit } from 'express-rate-limit';
 import { type Request, type Response, type NextFunction } from 'express';
 import { db } from '../lib/db-pool';
 
-// Create different limiters for different endpoints
+// Create different limiters with proper IP handling
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // Limit each IP to 100 requests per windowMs
   message: 'Too many requests, please try again later.',
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => req.realIP || req.ip,
   handler: (req: Request, res: Response) => {
     res.status(429).json({
       message: 'Too many requests, please try again later.',
@@ -24,6 +25,7 @@ const processingLimiter = rateLimit({
   message: 'Processing limit reached, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => req.realIP || req.ip,
   handler: (req: Request, res: Response) => {
     res.status(429).json({
       message: 'Processing limit reached, please try again later.',
@@ -39,6 +41,7 @@ const aiOperationsLimiter = rateLimit({
   message: 'AI operation limit reached, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => req.realIP || req.ip,
   handler: (req: Request, res: Response) => {
     res.status(429).json({
       message: 'AI operation limit reached, please try again later.',
@@ -53,14 +56,21 @@ const cacheLimiter = rateLimit({
   max: 50, // 50 requests per 5 minutes
   message: 'Cache operation limit reached, please try again later.',
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.realIP || req.ip,
+  handler: (req: Request, res: Response) => {
+    res.status(429).json({
+      message: 'Cache operation limit reached, please try again later.',
+      retryAfter: Math.ceil(req.rateLimit.resetTime.getTime() - Date.now()) / 1000
+    });
+  }
 });
 
-// WebSocket connection limiter
+// WebSocket connection limiter with improved IP handling
 const wsConnectionsPerIP = new Map<string, number>();
 
 function wsRateLimit(req: Request, res: Response, next: NextFunction) {
-  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const ip = req.realIP || req.ip;
   const currentConnections = wsConnectionsPerIP.get(ip) || 0;
   
   if (currentConnections >= 5) { // Maximum 5 concurrent WebSocket connections per IP

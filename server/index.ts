@@ -41,8 +41,17 @@ if (cluster.isPrimary) {
 } else {
   const app = express();
 
-  // Configure trust proxy settings for rate limiting behind proxy
-  app.set('trust proxy', true);
+  // Configure trust proxy settings for specific proxy IPs
+  app.set('trust proxy', function(ip: string) {
+    // Only trust specific proxy IPs
+    if (process.env.NODE_ENV === 'production') {
+      // In production, only trust known proxy IPs
+      const trustedProxies = (process.env.TRUSTED_PROXIES || '127.0.0.1').split(',');
+      return trustedProxies.includes(ip);
+    }
+    // In development, trust local IPs
+    return ip === '127.0.0.1' || ip === '::1';
+  });
 
   // Global error handler
   const errorHandler = (err: any, _req: Request, res: Response, _next: NextFunction) => {
@@ -75,6 +84,20 @@ if (cluster.isPrimary) {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
+  // Middleware to get real IP address
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const forwardedFor = req.headers['x-forwarded-for'];
+    if (forwardedFor && typeof forwardedFor === 'string') {
+      const ips = forwardedFor.split(',').map(ip => ip.trim());
+      // Use the leftmost non-private IP
+      const realIP = ips.find(ip => !isPrivateIP(ip)) || ips[0];
+      req.realIP = realIP;
+    } else {
+      req.realIP = req.ip;
+    }
+    next();
+  });
+
   // Apply rate limiting middleware with proper headers
   app.use('/api/', apiLimiter);
   app.use('/api/subtitles', processingLimiter);
@@ -88,7 +111,7 @@ if (cluster.isPrimary) {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
 
-  // Initialize WebSocket for progress tracking with authentication and improved error handling
+  // Initialize WebSocket for progress tracking with authentication
   progressTracker.initializeWebSocket(server, authenticateWs);
 
   // Setup authentication first
@@ -162,4 +185,18 @@ if (cluster.isPrimary) {
   // Handle termination signals
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+}
+
+// Helper function to check for private IP addresses
+function isPrivateIP(ip: string): boolean {
+  return /^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|127\.)/.test(ip);
+}
+
+// Add TypeScript declaration for Request
+declare global {
+  namespace Express {
+    interface Request {
+      realIP: string;
+    }
+  }
 }
