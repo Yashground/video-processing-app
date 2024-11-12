@@ -72,9 +72,43 @@ export const setupProxy = (app: Express) => {
   ], viteProxy);
 
   // Handle WebSocket upgrade events
-  app.on('upgrade', (req: any, socket: any, head: any) => {
-    if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite') || req.url?.startsWith('/progress')) {
-      viteProxy.upgrade(req, socket, head);
+  app.on('upgrade', async (req: any, socket: any, head: any) => {
+    try {
+      if (req.url?.startsWith('/progress')) {
+        // Apply authentication before upgrading
+        const isAuthenticated = await authenticateWs(req);
+        if (!isAuthenticated) {
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      }
+      
+      if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite') || req.url?.startsWith('/progress')) {
+        viteProxy.upgrade(req, socket, head);
+      }
+    } catch (error) {
+      console.error('WebSocket upgrade error:', error);
+      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+      socket.destroy();
     }
   });
 };
+
+// Add the authenticateWs function
+async function authenticateWs(req: any) {
+  // Implement your authentication logic here
+  // Example: Check if a JWT token is present in the request headers
+  const token = req.headers.authorization?.split(' ')[1];
+  if (token) {
+    // Verify the JWT token
+    try {
+      // ... your JWT verification logic here ...
+      return true;
+    } catch (error) {
+      console.error('JWT verification error:', error);
+      return false;
+    }
+  }
+  return false;
+}

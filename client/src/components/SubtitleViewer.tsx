@@ -173,6 +173,51 @@ function TimeSavingEstimate({ wordCount, duration }: { wordCount: number; durati
   );
 }
 
+// Add new grouping utilities
+function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
+  const groups: Subtitle[][] = [];
+  let currentGroup: Subtitle[] = [];
+  let lastEndTime = 0;
+
+  for (let i = 0; i < subtitles.length; i++) {
+    const subtitle = subtitles[i];
+    const timeGap = subtitle.start - lastEndTime;
+
+    // Start a new group if:
+    // 1. Current group is empty
+    // 2. Time gap is more than 2 seconds (indicating a natural pause)
+    // 3. Current group has more than 5 sentences
+    // 4. Current sentence ends with a strong punctuation mark
+    const shouldStartNewGroup = 
+      currentGroup.length === 0 ||
+      timeGap > 2000 || // 2 seconds
+      currentGroup.length >= 5 ||
+      /[.!?]\s*$/.test(currentGroup[currentGroup.length - 1]?.text || "");
+
+    if (shouldStartNewGroup && currentGroup.length > 0) {
+      groups.push([...currentGroup]);
+      currentGroup = [];
+    }
+
+    currentGroup.push(subtitle);
+    lastEndTime = subtitle.end;
+  }
+
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  return groups;
+}
+
+function cleanAndJoinText(subtitles: Subtitle[]): string {
+  return subtitles
+    .map(sub => sub.text.trim())
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -266,7 +311,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         // Use port 5000 explicitly since that's where our server is running
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/progress`;
-        const ws = new WebSocket(wsUrl);
+        
+        // Include credentials in WebSocket connection
+        const ws = new WebSocket(wsUrl, {
+          headers: {
+            // Use the token from your global state or context 
+            Authorization: `Bearer ${localStorage.getItem('token')}`
+          }
+        });
         wsRef.current = ws;
 
         const connectionTimeout = setTimeout(() => {
@@ -276,7 +328,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           }
         }, 5000);
 
-        ws.onopen = () => {
+        ws.addEventListener('open', () => {
           clearTimeout(connectionTimeout);
           setWsConnected(true);
           setWsRetrying(false);
@@ -285,7 +337,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           // Setup ping interval
           pingIntervalRef.current = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send('ping');
+              ws.send(JSON.stringify({ type: 'ping' }));
             }
           }, 30000);
           
@@ -293,11 +345,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           ws.send(JSON.stringify({ type: 'init', videoId }));
           
           resolve();
-        };
+        });
 
-        ws.onmessage = (event) => {
+        ws.addEventListener('message', (event) => {
           try {
-            const update: ProgressUpdate = JSON.parse(event.data);
+            const data = JSON.parse(event.data);
+            if (data.type === 'pong') return;
+
+            const update: ProgressUpdate = data;
             if (update.videoId === videoId) {
               if (update.error) {
                 setWsError(new Error(update.error));
@@ -316,13 +371,15 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
-            handleWebSocketError(error);
           }
-        };
+        });
 
-        ws.onerror = handleWebSocketError;
+        ws.addEventListener('error', (error) => {
+          console.error('WebSocket error:', error);
+          handleWebSocketError(error);
+        });
 
-        ws.onclose = (event) => {
+        ws.addEventListener('close', (event) => {
           clearTimeout(connectionTimeout);
           console.log('WebSocket closed:', event.code, event.reason);
           setWsConnected(false);
@@ -334,14 +391,13 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             
             retryTimeoutRef.current = setTimeout(() => {
               setRetryCount(count => count + 1);
-              connectWebSocket().catch(reject);
+              connectWebSocket().catch(console.error);
             }, retryDelay);
           } else if (retryCount >= 3) {
             setWsRetrying(false);
             setWsError(new Error('Failed to maintain connection to the server'));
-            reject(new Error('Maximum retry attempts reached'));
           }
-        };
+        });
       } catch (error) {
         console.error('Error establishing WebSocket connection:', error);
         reject(error);
@@ -467,6 +523,27 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
+  const renderSubtitles = () => {
+    if (!subtitles) return null;
+
+    const groups = groupSentencesByContext(subtitles);
+    
+    return groups.map((group, groupIndex) => {
+      const groupText = cleanAndJoinText(group);
+      const groupStartTime = group[0].start;
+      const groupEndTime = group[group.length - 1].end;
+
+      return (
+        <div key={`group-${groupIndex}-${groupStartTime}`} className={textStyles.paragraph}>
+          <span className={textStyles.timestamp}>
+            {formatTimestamp(groupStartTime)}
+          </span>
+          {groupText}
+        </div>
+      );
+    });
+  };
+
   return (
     <ErrorBoundary onError={handleError}>
       <div className="p-6 animate-fade-in">
@@ -546,14 +623,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             ) : subtitles && subtitles.length > 0 ? (
               <div className={textStyles.container}>
                 <div className={textStyles.textContainer}>
-                  {subtitles.map((subtitle, index) => (
-                    <div key={subtitle.start} className={textStyles.paragraph}>
-                      <span className={textStyles.timestamp}>
-                        {formatTimestamp(subtitle.start)}
-                      </span>
-                      {subtitle.text}
-                    </div>
-                  ))}
+                  {renderSubtitles()}
                 </div>
               </div>
             ) : (

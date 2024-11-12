@@ -54,12 +54,16 @@ class ProgressTracker extends EventEmitter {
       perMessageDeflate: false,
       verifyClient: async ({ req }, done) => {
         try {
+          // Add error logging
+          console.log('WebSocket authentication attempt');
           const result = await authenticate(req);
           if (!result) {
+            console.log('WebSocket authentication failed: unauthorized');
             done(false, 401, 'Unauthorized');
             return;
           }
           (req as AuthenticatedRequest).user = result.user;
+          console.log('WebSocket authentication successful');
           done(true);
         } catch (error) {
           console.error('WebSocket authentication error:', error);
