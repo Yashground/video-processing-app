@@ -8,73 +8,74 @@ import { setupProxy } from "./proxy";
 
 const app = express();
 
-// Add CORS headers for development with proper WebSocket support
+// Global error handler
+const errorHandler = (err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Server error:', err);
+  const status = err.status || err.statusCode || 500;
+  const message = err.message || "Internal Server Error";
+  res.status(status).json({ message });
+};
+
+// Proper CORS setup
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin) {
     res.header('Access-Control-Allow-Origin', origin);
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Connection, Upgrade, Sec-WebSocket-Key, Sec-WebSocket-Version');
+    res.header('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.header('Access-Control-Allow-Credentials', 'true');
-    
-    // Handle WebSocket upgrade requests
-    if (req.headers.upgrade === 'websocket') {
-      res.header('Connection', 'Upgrade');
-      res.header('Upgrade', 'websocket');
-    }
   }
-  
-  // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+    return res.status(200).end();
   }
   next();
 });
 
-// Move proxy setup before other middleware
-setupProxy(app);
+// Body parsing middleware with increased limits
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+// Create server with proper timeouts
+const server = createServer(app);
+server.keepAliveTimeout = 65000; // Slightly higher than 60 seconds
+server.headersTimeout = 66000; // Slightly higher than keepAliveTimeout
 
+// Initialize WebSocket for progress tracking
+progressTracker.initializeWebSocket(server);
+
+// Setup authentication first
+setupAuth(app);
+
+// Register routes after auth setup
+registerRoutes(app);
+
+// Add error handler
+app.use(errorHandler);
+
+// Setup Vite or static serving based on environment
 (async () => {
-  const server = createServer(app);
-  
-  // Increase server timeout for long-running WebSocket connections
-  server.timeout = 300000; // 5 minutes
-  server.keepAliveTimeout = 300000;
-  server.headersTimeout = 301000; // Slightly higher than keepAliveTimeout
-  
-  // Set up authentication and routes after proxy
-  setupAuth(app);
-  registerRoutes(app);
-  
-  // Initialize WebSocket server for progress tracking
-  progressTracker.initializeWebSocket(server);
+  try {
+    if (process.env.NODE_ENV !== "production") {
+      await setupVite(app, server);
+    } else {
+      serveStatic(app);
+    }
 
-  // Error handling middleware
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    console.error('Server error:', err);
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-    res.status(status).json({ message });
-  });
-
-  // Set up Vite in development mode
-  if (app.get("env") === "development") {
-    await setupVite(app, server);
-  } else {
-    serveStatic(app);
-  }
-
-  const PORT = 5000;
-  server.listen(PORT, "0.0.0.0", () => {
-    const formattedTime = new Date().toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: true,
+    const PORT = process.env.PORT || 5000;
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`${new Date().toLocaleTimeString()} [express] serving on port ${PORT}`);
     });
-    console.log(`${formattedTime} [express] serving on port ${PORT}`);
-  });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
 })();
+
+// Handle unexpected errors
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (error) => {
+  console.error('Unhandled Rejection:', error);
+});

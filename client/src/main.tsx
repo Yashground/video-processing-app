@@ -10,7 +10,6 @@ import Home from "./pages/Home";
 import { Landing } from "./pages/Landing";
 import { useUser } from "@/hooks/use-user";
 
-// Protected Route component to handle authentication
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
   const { user, isLoading } = useUser();
   
@@ -37,15 +36,14 @@ createRoot(document.getElementById("root")!).render(
     <SWRConfig 
       value={{ 
         fetcher,
-        // Add global SWR configuration for better error handling
+        revalidateOnFocus: false,
+        revalidateOnReconnect: false,
+        shouldRetryOnError: false,
         onError: (error) => {
-          // If we get a 401 error, redirect to login page
           if (error.status === 401) {
             window.location.href = "/";
           }
-        },
-        // Disable revalidation on window focus for authentication
-        revalidateOnFocus: false
+        }
       }}
     >
       <Switch>
@@ -61,5 +59,5 @@ createRoot(document.getElementById("root")!).render(
       </Switch>
       <Toaster />
     </SWRConfig>
-  </StrictMode>,
+  </StrictMode>
 );

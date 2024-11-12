@@ -32,6 +32,7 @@ export function Landing() {
   const [, setLocation] = useLocation();
 
   useEffect(() => {
+    // Only redirect if we have a user and we're not in a loading state
     if (user && !isLoading) {
       setLocation("/home");
     }
@@ -39,6 +40,8 @@ export function Landing() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    
     setError("");
     setIsSubmitting(true);
     
@@ -46,14 +49,15 @@ export function Landing() {
       const result = await (isLogin ? login : register)({ username, password });
       if (!result.ok) {
         setError(result.message);
-      } else {
-        setLocation("/home");
       }
+    } catch (error) {
+      setError("An unexpected error occurred. Please try again.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  // Show loading state
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-pastel-blue via-pastel-blue/50 to-white flex items-center justify-center">
@@ -65,6 +69,7 @@ export function Landing() {
     );
   }
 
+  // Don't render anything if we have a user (prevents flash before redirect)
   if (user) {
     return null;
   }
@@ -121,7 +126,7 @@ export function Landing() {
             </div>
             
             <div 
-              className="space-y-4 p-6 rounded-lg border bg-white/50 backdrop-blur-sm animate-fade-in-up animate-float"
+              className="space-y-4 p-6 rounded-lg border bg-white/50 backdrop-blur-sm animate-fade-in-up"
               style={{ animationDelay: '0.6s' }}
             >
               <h2 className="text-2xl font-semibold bg-gradient-to-r from-primary to-pastel-purple bg-clip-text text-transparent">

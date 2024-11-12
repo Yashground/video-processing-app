@@ -8,57 +8,71 @@ export const setupProxy = (app: Express) => {
     ws: true,
     changeOrigin: true,
     secure: false,
+    xfwd: true,
+    proxyTimeout: 60000,
+    timeout: 60000,
     headers: {
-      'Connection': 'keep-alive',
-      'Cache-Control': 'no-cache'
+      'Connection': 'keep-alive'
     },
     onProxyReq: (proxyReq: any, req: IncomingMessage) => {
-      // Handle WebSocket upgrade requests
-      if (req.headers.upgrade === 'websocket') {
+      // Copy cookies to proxy request
+      if (req.headers.cookie) {
+        proxyReq.setHeader('Cookie', req.headers.cookie);
+      }
+
+      // Handle WebSocket upgrade
+      if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
         proxyReq.setHeader('Connection', 'Upgrade');
         proxyReq.setHeader('Upgrade', 'websocket');
       }
     },
-    onProxyRes: (proxyRes: any) => {
-      // Ensure proper headers for WebSocket connections
-      if (proxyRes.headers.upgrade === 'websocket') {
+    onProxyRes: (proxyRes: any, req: IncomingMessage, res: ServerResponse) => {
+      // Add CORS headers for development
+      const origin = req.headers.origin;
+      if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
+      }
+
+      // Handle WebSocket upgrade
+      if (proxyRes.headers.upgrade && proxyRes.headers.upgrade.toLowerCase() === 'websocket') {
         proxyRes.headers.connection = 'Upgrade';
+      }
+
+      // Copy cookies from proxy response
+      const cookies = proxyRes.headers['set-cookie'];
+      if (cookies) {
+        res.setHeader('Set-Cookie', cookies);
       }
     },
     onError: (err: Error, req: IncomingMessage, res: ServerResponse) => {
       console.error('Proxy error:', err);
       if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Proxy error occurred');
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          error: 'Proxy error occurred',
+          details: process.env.NODE_ENV === 'development' ? err.message : undefined
+        }));
       }
     }
   });
 
-  // Mount proxy middleware for Vite paths
+  // Mount proxy middleware for development paths
   app.use([
     '/@vite',
     '/@fs',
     '/@id',
+    '/src',
     '/__vite_hmr',
     '/.vite',
-    '/node_modules',
-    '/src'
-  ], (req, res, next) => {
-    if (req.headers.upgrade === 'websocket') {
-      res.setHeader('Connection', 'Upgrade');
-      res.setHeader('Upgrade', 'websocket');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Connection, Upgrade, Sec-WebSocket-Key, Sec-WebSocket-Version');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-    viteProxy(req, res, next);
-  });
+    '/node_modules'
+  ], viteProxy);
 
   // Handle WebSocket upgrade events
   app.on('upgrade', (req: any, socket: any, head: any) => {
     if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
-      socket.on('error', (error: Error) => {
-        console.error('WebSocket error:', error);
-      });
       viteProxy.upgrade(req, socket, head);
     }
   });
