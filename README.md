@@ -3,6 +3,16 @@
 ## Overview
 A powerful tool that extracts text from YouTube videos and generates concise summaries. Perfect for quickly understanding video content through text transcription and AI-powered summarization.
 
+## Screenshots
+
+### Landing Page
+![Landing Page - Video Processing Interface](./screenshots/landing.png)
+*The main landing page where users can input YouTube URLs for processing*
+
+### Application Interface
+![Application Interface - Video Processing and History View](./screenshots/main-interface.png)
+*The main application interface showing video processing status and history sidebar*
+
 ## Features
 - YouTube video processing and subtitle extraction
 - AI-powered text summarization
