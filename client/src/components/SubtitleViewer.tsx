@@ -337,6 +337,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }
   );
 
+  // Add unique key generation helper
+  const generateUniqueKey = (videoId: string, timestamp: number) => {
+    return `${videoId}-${timestamp}-${Math.random().toString(36).substr(2, 9)}`;
+  };
+
   useEffect(() => {
     if (subtitles && onTextUpdate) {
       const fullText = subtitles
@@ -622,25 +627,26 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
+  // Update subtitle rendering to use unique keys
   const renderSubtitles = () => {
     if (!subtitles) return null;
 
     const groups = groupSentencesByContext(subtitles);
-    
-    return groups.map((group, groupIndex) => {
-      const groupText = cleanAndJoinText(group);
-      const groupStartTime = group[0].start;
-      const groupEndTime = group[group.length - 1].end;
-
-      return (
-        <div key={`group-${groupIndex}-${groupStartTime}`} className={textStyles.paragraph}>
-          <span className={textStyles.timestamp}>
-            {formatTimestamp(groupStartTime)}
-          </span>
-          {groupText}
-        </div>
-      );
-    });
+    return groups.map((group, groupIndex) => (
+      <div 
+        key={generateUniqueKey(videoId!, groupIndex)} 
+        className="mb-4 p-4 rounded-lg bg-card"
+      >
+        {group.map((subtitle, index) => (
+          <div 
+            key={generateUniqueKey(videoId!, subtitle.start)} 
+            className="text-card-foreground"
+          >
+            {subtitle.text}
+          </div>
+        ))}
+      </div>
+    ));
   };
 
   return (
@@ -727,21 +733,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
                 <ScrollArea className="h-[600px] rounded-lg border bg-background/50 backdrop-blur-sm">
                   <div className={textStyles.textContainer}>
-                    {subtitles && groupSentencesByContext(subtitles).map((group, groupIndex) => (
-                      <div 
-                        key={`group-${groupIndex}`} 
-                        className={textStyles.paragraphGroup}
-                      >
-                        {group.map((subtitle, index) => (
-                          <div 
-                            key={`${groupIndex}-${index}`} // Unique key for each subtitle within the group
-                            className={textStyles.paragraph}
-                          >
-                            {subtitle.text}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
+                    {renderSubtitles()}
                   </div>
                   {wordCount > 0 && videoDuration > 0 && (
                     <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
