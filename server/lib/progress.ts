@@ -212,105 +212,128 @@ class ProgressTracker extends EventEmitter {
       path: '/api/ws/progress',
       verifyClient: async (info, callback) => {
         try {
-          console.log('Verifying WebSocket client connection');
+          console.log('[WebSocket] Verifying client connection');
           const authResult = await authenticate(info.req);
           
           if (!authResult) {
-            console.error('WebSocket authentication failed');
+            console.error('[WebSocket] Authentication failed');
             callback(false, 401, 'Unauthorized');
             return;
           }
 
           const userId = authResult.user?.id;
           if (!userId) {
-            console.error('No user ID in authentication result');
+            console.error('[WebSocket] No user ID in authentication result');
             callback(false, 401, 'Invalid user');
             return;
           }
 
+          // Add rate limiting for WebSocket connections
           const userConnections = this.userConnections.get(userId) || new Set();
           if (userConnections.size >= this.MAX_CLIENTS_PER_USER) {
-            console.error(`Too many connections for user ${userId}`);
+            console.error(`[WebSocket] Too many connections for user ${userId}`);
             callback(false, 429, 'Too many connections');
             return;
           }
 
-          Object.assign(info.req, { user: authResult.user, session: authResult.session });
+          info.req.headers['x-user-id'] = userId;
           callback(true);
         } catch (error) {
-          console.error('WebSocket authentication error:', error);
+          console.error('[WebSocket] Authentication error:', error);
           callback(false, 500, 'Internal Server Error');
         }
       },
       clientTracking: true
     });
 
-    this.wss.on('connection', (ws: WebSocketWithId, req: AuthenticatedRequest) => {
-      const userId = req.user?.id;
-      if (!userId) {
-        ws.close(1011, 'Authentication failed');
-        return;
-      }
-
-      console.log('New WebSocket connection established for user:', userId);
-
-      ws.id = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-      ws.userId = userId;
-      ws.isAlive = true;
-      ws.lastPing = Date.now();
-      ws.reconnectAttempts = 0;
-
-      // Add to connection pool
-      const pool = this.getOrCreatePool();
-      pool.connections.add(ws);
-
-      // Add to user connections
-      if (!this.userConnections.has(userId)) {
-        this.userConnections.set(userId, new Set());
-      }
-      this.userConnections.get(userId)?.add(ws);
-
-      // Setup heartbeat handling
-      ws.on('pong', () => {
-        ws.isAlive = true;
-        this.handleHeartbeat(ws);
-      });
-
-      this.handleHeartbeat(ws);
-
-      // Send initial state
-      if (ws.readyState === WebSocket.OPEN) {
-        this.sendInitialState(ws);
-      }
-
-      // Handle messages
-      ws.on('message', (data) => this.handleMessage(ws, data));
-
-      // Handle connection close
-      ws.on('close', (code, reason) => {
-        console.log(`WebSocket connection closed for user ${userId}:`, code, reason.toString());
-        this.cleanup(ws);
-      });
-
-      // Handle errors
-      ws.on('error', (error) => {
-        console.error(`WebSocket error for user ${userId}:`, error);
-        if (ws.reconnectAttempts && ws.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
-          ws.reconnectAttempts++;
-          setTimeout(() => {
-            if (ws.readyState === WebSocket.CLOSED) {
-              this.cleanup(ws);
-            }
-          }, this.RECONNECT_DELAY * ws.reconnectAttempts);
-        } else {
-          this.cleanup(ws);
+    // Enhanced connection handling
+    this.wss.on('connection', async (ws: WebSocketWithId, req: AuthenticatedRequest) => {
+      try {
+        const userId = req.headers['x-user-id'] as string;
+        if (!userId) {
+          console.error('[WebSocket] No user ID in headers');
+          ws.close(1011, 'Authentication failed');
+          return;
         }
-      });
+
+        console.log(`[WebSocket] New connection established for user: ${userId}`);
+
+        ws.id = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        ws.userId = userId;
+        ws.isAlive = true;
+        ws.lastPing = Date.now();
+        ws.reconnectAttempts = 0;
+
+        // Add to connection pool
+        const pool = this.getOrCreatePool();
+        pool.connections.add(ws);
+
+        // Add to user connections
+        if (!this.userConnections.has(userId)) {
+          this.userConnections.set(userId, new Set());
+        }
+        this.userConnections.get(userId)?.add(ws);
+
+        // Setup heartbeat
+        const heartbeatInterval = setInterval(() => {
+          if (!ws.isAlive) {
+            console.log('[WebSocket] Client lost connection, terminating');
+            clearInterval(heartbeatInterval);
+            this.cleanup(ws);
+            return;
+          }
+          ws.isAlive = false;
+          ws.ping();
+        }, this.HEARTBEAT_INTERVAL);
+
+        ws.on('pong', () => {
+          ws.isAlive = true;
+          ws.lastPing = Date.now();
+          this.handleHeartbeat(ws);
+        });
+
+        // Send initial state
+        if (ws.readyState === WebSocket.OPEN) {
+          this.sendInitialState(ws);
+        }
+
+        // Handle messages with improved error handling
+        ws.on('message', (data) => {
+          try {
+            this.handleMessage(ws, data);
+          } catch (error) {
+            console.error('[WebSocket] Message handling error:', error);
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'error',
+                error: 'Failed to process message',
+                timestamp: Date.now()
+              }));
+            }
+          }
+        });
+
+        ws.on('close', (code, reason) => {
+          console.log(`[WebSocket] Connection closed for user ${userId}:`, code, reason.toString());
+          clearInterval(heartbeatInterval);
+          this.cleanup(ws);
+        });
+
+        ws.on('error', (error) => {
+          console.error(`[WebSocket] Error for user ${userId}:`, error);
+          clearInterval(heartbeatInterval);
+          this.cleanup(ws);
+        });
+
+      } catch (error) {
+        console.error('[WebSocket] Connection handling error:', error);
+        ws.close(1011, 'Internal error');
+      }
     });
 
     // Handle server errors
     this.wss.on('error', (error) => {
-      console.error('WebSocket server error:', error);
+      console.error('[WebSocket] Server error:', error);
     });
 
     // Handle progress updates
@@ -318,7 +341,8 @@ class ProgressTracker extends EventEmitter {
       this.progressMap.set(update.videoId, update);
       this.broadcast(JSON.stringify({
         type: 'progress',
-        ...update
+        ...update,
+        timestamp: Date.now()
       }));
     });
   }

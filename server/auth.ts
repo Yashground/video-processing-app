@@ -87,17 +87,26 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
   try {
     const cookieHeader = request.headers.cookie;
     if (!cookieHeader) {
+      console.error('[WebSocket Auth] No cookie header');
       return false;
     }
 
     const sessionId = verifySignature(cookieHeader, SECRET);
     if (!sessionId) {
+      console.error('[WebSocket Auth] Invalid session signature');
       return false;
     }
 
     return new Promise((resolve) => {
       sessionStore.get(sessionId, async (err, session) => {
-        if (err || !session || !session.passport?.user) {
+        if (err) {
+          console.error('[WebSocket Auth] Session retrieval error:', err);
+          resolve(false);
+          return;
+        }
+
+        if (!session?.passport?.user) {
+          console.error('[WebSocket Auth] No user in session');
           resolve(false);
           return;
         }
@@ -110,25 +119,41 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
             .limit(1);
 
           if (!user) {
+            console.error('[WebSocket Auth] User not found in database');
             resolve(false);
             return;
           }
 
-          // Update session
-          if (session.cookie) {
-            session.cookie.expires = new Date(Date.now() + (24 * 60 * 60 * 1000));
+          // Ensure session is still valid
+          const now = Date.now();
+          if (session.cookie && session.cookie.expires) {
+            const expiresAt = new Date(session.cookie.expires).getTime();
+            if (now > expiresAt) {
+              console.error('[WebSocket Auth] Session expired');
+              resolve(false);
+              return;
+            }
           }
 
+          // Update session expiry
+          session.cookie = session.cookie || {};
+          session.cookie.expires = new Date(now + (24 * 60 * 60 * 1000));
+
+          // Save updated session
           sessionStore.set(sessionId, session, (err) => {
             if (err) {
+              console.error('[WebSocket Auth] Session update error:', err);
               resolve(false);
               return;
             }
 
+            // Remove sensitive data before attaching to request
             const { password: _, ...userWithoutPassword } = user;
             const authenticatedRequest = request as AuthenticatedRequest;
             authenticatedRequest.user = userWithoutPassword;
             authenticatedRequest.session = session as AuthenticatedRequest['session'];
+            
+            console.log('[WebSocket Auth] Authentication successful for user:', userWithoutPassword.username);
             resolve(authenticatedRequest);
           });
         } catch (error) {

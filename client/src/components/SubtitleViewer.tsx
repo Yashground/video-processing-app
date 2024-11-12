@@ -327,18 +327,167 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
   // Updated WebSocket Configuration with enhanced reconnection strategy
   const WS_CONFIG = {
-    connectionTimeout: 8000, // Reduced from 10000
+    connectionTimeout: 8000,
     maxRetries: 5,
     minReconnectionDelay: 1000,
     maxReconnectionDelay: 30000,
-    reconnectionDelayGrowFactor: 2,
+    reconnectionDelayGrowFactor: 1.5,
     debug: process.env.NODE_ENV === 'development',
     timeoutInterval: 5000,
     maxEnqueuedMessages: 50,
+    startClosed: true,
+    WebSocket: window.WebSocket,
+    shouldReconnect: (closeEvent: CloseEvent) => {
+      return closeEvent.code !== 1000 && closeEvent.code !== 1001;
+    }
   };
 
   const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
   const isAuthenticated = !!user && !authError;
+
+  // Enhanced error handling for WebSocket
+  useEffect(() => {
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error('Unhandled promise rejection:', event.reason);
+      if (event.reason?.message?.includes('WebSocket')) {
+        handleWebSocketError(new Error(event.reason.message));
+      }
+    };
+
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, []);
+
+  // Updated connection logic with proper initialization timing
+  const connectWebSocket = useCallback(() => {
+    if (!videoId || !isAuthenticated || wsRef.current) return;
+
+    cleanup();
+    
+    const wsUrl = getWebSocketUrl();
+    console.log('[WebSocket] Connecting to:', wsUrl);
+  
+    try {
+      const ws = new ReconnectingWebSocket(wsUrl, [], {
+        ...WS_CONFIG,
+        headers: {
+          'Cookie': document.cookie
+        }
+      });
+    
+      wsRef.current = ws;
+  
+      ws.addEventListener('open', () => {
+        console.log('[WebSocket] Connection established');
+        setWsConnected(true);
+        setWsRetrying(false);
+        setWsError(null);
+        setRetryCount(0);
+  
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'init',
+            videoId,
+            timestamp: Date.now()
+          }));
+        }
+      });
+  
+      ws.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'error') {
+            handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
+            return;
+          }
+
+          if (data.type === 'auth_error') {
+            console.log('[WebSocket] Authentication error, refreshing session');
+            mutateUser()
+              .then(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  cleanup();
+                  setTimeout(connectWebSocket, 1000); // Delay reconnection
+                }
+              })
+              .catch((error) => {
+                console.error('[WebSocket] Failed to refresh authentication:', error);
+                cleanup();
+              });
+            return;
+          }
+  
+          if (data.type === 'progress') {
+            setProgress(data.progress);
+            setProgressMessage(data.message || '');
+            setProgressStage(data.stage);
+            setProgressSubstage(data.substage || '');
+          }
+        } catch (error) {
+          console.error('[WebSocket] Error parsing message:', error);
+        }
+      });
+  
+      ws.addEventListener('error', (error) => {
+        console.error('[WebSocket] Error:', error);
+        handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection error'));
+      });
+  
+      ws.addEventListener('close', (event) => {
+        console.log('[WebSocket] Closed:', event.code, event.reason);
+        setWsConnected(false);
+      
+        if (event.code !== 1000 && retryCount < WS_CONFIG.maxRetries) {
+          handleReconnect();
+        } else {
+          setWsRetrying(false);
+        }
+      });
+  
+    } catch (error) {
+      console.error('[WebSocket] Creation error:', error);
+      handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket connection'));
+    }
+  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser, retryCount]);
+
+  // Enhanced cleanup with proper resource management
+  const cleanup = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = undefined;
+    }
+
+    if (wsRef.current) {
+      try {
+        wsRef.current.close(1000, 'Normal closure');
+      } catch (error) {
+        console.error('[WebSocket] Error during cleanup:', error);
+      } finally {
+        wsRef.current = null;
+      }
+    }
+
+    setWsConnected(false);
+    setWsRetrying(false);
+  }, []);
+
+  // Updated initialization
+  useEffect(() => {
+    // Delay initial connection to ensure proper initialization
+    const initTimeout = setTimeout(() => {
+      if (isAuthenticated && videoId) {
+        connectWebSocket();
+      }
+    }, 1000);
+
+    return () => {
+      clearTimeout(initTimeout);
+      cleanup();
+    };
+  }, [connectWebSocket, cleanup, isAuthenticated, videoId]);
 
   const handleReconnect = useCallback(() => {
     if (!wsRef.current || retryCount >= WS_CONFIG.maxRetries) {
@@ -365,126 +514,12 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     }, delay);
   }, [retryCount]);
 
-  const cleanup = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
-    if (wsRef.current) {
-      wsRef.current.close(1000, 'Normal closure');
-      wsRef.current = null;
-    }
-    setWsConnected(false);
-    setWsRetrying(false);
-  }, []);
-
-  // Update the getWebSocketUrl function to handle port correctly
   const getWebSocketUrl = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     return `${protocol}//${host}/api/ws/progress`;
   }, []);
 
-  // Update WebSocket initialization
-  const connectWebSocket = useCallback(() => {
-    if (!videoId || !isAuthenticated || wsRef.current) return;
-
-    cleanup();
-  
-    const wsUrl = getWebSocketUrl();
-    console.log('Connecting to WebSocket:', wsUrl);
-  
-    try {
-      const ws = new ReconnectingWebSocket(wsUrl, [], {
-        connectionTimeout: 10000,
-        maxRetries: 5,
-        debug: process.env.NODE_ENV === 'development',
-        startClosed: false,
-        minReconnectionDelay: 1000,
-        maxReconnectionDelay: 30000,
-        reconnectionDelayGrowFactor: 1.5,
-        maxEnqueuedMessages: 50,
-      });
-    
-      wsRef.current = ws;
-  
-      ws.addEventListener('open', () => {
-        console.log('WebSocket connection established');
-        setWsConnected(true);
-        setWsRetrying(false);
-        setWsError(null);
-        setRetryCount(0);
-  
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'init',
-            videoId,
-            timestamp: Date.now()
-          }));
-        }
-      });
-  
-      ws.addEventListener('message', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-        
-          if (data.type === 'error') {
-            handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
-            return;
-          }
-
-          if (data.type === 'auth_error') {
-            console.log('Authentication error, attempting to refresh session');
-            mutateUser()
-              .then(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                  cleanup();
-                  connectWebSocket();
-                }
-              })
-              .catch(() => {
-                console.error('Failed to refresh authentication');
-                cleanup();
-              });
-            return;
-          }
-  
-          if (data.type === 'progress') {
-            setProgress(data.progress);
-            setProgressMessage(data.message || '');
-            setProgressStage(data.stage);
-            setProgressSubstage(data.substage || '');
-          }
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-        }
-      });
-  
-      ws.addEventListener('error', (error) => {
-        console.error('WebSocket error:', error);
-        handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection error'));
-      });
-  
-      ws.addEventListener('close', (event) => {
-        console.log('WebSocket closed:', event.code, event.reason);
-        setWsConnected(false);
-      
-        if (event.code !== 1000) {
-          handleReconnect();
-        }
-      });
-  
-    } catch (error) {
-      console.error('Error creating WebSocket:', error);
-      handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket connection'));
-    }
-  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser]);
-
-  useEffect(() => {
-    connectWebSocket();
-    return cleanup;
-  }, [connectWebSocket, cleanup]);
-
-  // Add useEffect for updating text when subtitles change
   useEffect(() => {
     if (subtitles?.length && onTextUpdate) {
       const fullText = subtitles.map(s => s.text).join(' ');

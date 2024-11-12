@@ -34,56 +34,73 @@ export const setupProxy = (app: Express) => {
 
   const server = app.get('server') as Server;
 
-  // WebSocket upgrade handler
+  // WebSocket upgrade handler with improved error handling
   const handleUpgrade = async (req: IncomingMessage, socket: Socket, head: Buffer) => {
     try {
-      if (!req.headers.upgrade?.toLowerCase().includes('websocket')) {
-        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-
       // Handle progress WebSocket endpoint
       if (req.url?.startsWith('/api/ws/progress')) {
-        if (!req.headers.cookie) {
+        const cookieHeader = req.headers.cookie;
+        if (!cookieHeader) {
+          console.error('[WebSocket Upgrade] No cookie header');
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
           socket.destroy();
           return;
         }
 
-        // Forward essential headers
+        // Set essential headers for WebSocket upgrade
         const headers = {
           ...req.headers,
-          'Connection': 'upgrade',
+          'Cookie': cookieHeader,
+          'Connection': 'Upgrade',
           'Upgrade': 'websocket',
           'Sec-WebSocket-Key': req.headers['sec-websocket-key'],
-          'Sec-WebSocket-Version': req.headers['sec-websocket-version']
+          'Sec-WebSocket-Version': req.headers['sec-websocket-version'],
+          'Sec-WebSocket-Protocol': req.headers['sec-websocket-protocol']
         };
-        
-        // Apply headers before authentication
-        req.headers = headers;
 
+        // Apply headers before authentication
+        Object.assign(req.headers, headers);
+
+        // Authenticate WebSocket connection
         const authResult = await authenticateWs(req as unknown as Request);
         if (!authResult) {
+          console.error('[WebSocket Auth] Authentication failed');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
           socket.destroy();
           return;
         }
 
+        // Enhanced socket configuration
         socket.setNoDelay(true);
         socket.setTimeout(120000);
         socket.setKeepAlive(true, 60000);
 
-        socket.on('error', () => socket.destroy());
-        socket.on('timeout', () => socket.destroy());
+        // Improved error handling for socket events
+        socket.on('error', (err) => {
+          console.error('[WebSocket Socket Error]:', err);
+          socket.destroy();
+        });
 
-        viteProxy.upgrade(req, socket, head);
+        socket.on('timeout', () => {
+          console.error('[WebSocket Socket Timeout]');
+          socket.destroy();
+        });
+
+        // Forward the upgrade request to WebSocket server
+        try {
+          viteProxy.upgrade(req, socket, head);
+        } catch (upgradeError) {
+          console.error('[WebSocket Upgrade Error]:', upgradeError);
+          socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+          socket.destroy();
+        }
       }
       // Handle Vite HMR WebSocket endpoint
       else if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
         viteProxy.upgrade(req, socket, head);
       }
       else {
+        console.error('[WebSocket Upgrade] Unknown endpoint:', req.url);
         socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
         socket.destroy();
       }
