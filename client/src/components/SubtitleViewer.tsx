@@ -389,141 +389,95 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     if (!videoId || !isAuthenticated || wsRef.current) return;
 
     cleanup();
-
+  
     const wsUrl = getWebSocketUrl();
     console.log('Connecting to WebSocket:', wsUrl);
-    
+  
     try {
       const ws = new ReconnectingWebSocket(wsUrl, [], {
-        ...WS_CONFIG,
-        // Add credentials support
         connectionTimeout: 10000,
         maxRetries: 5,
         debug: process.env.NODE_ENV === 'development',
         startClosed: false,
-        webSocket: class extends WebSocket {
-          constructor(url: string, protocols?: string | string[]) {
-            super(url, protocols);
-            // Ensure credentials are included
-            this.credentials = 'include';
-          }
-        }
+        minReconnectionDelay: 1000,
+        maxReconnectionDelay: 30000,
+        reconnectionDelayGrowFactor: 1.5,
+        maxEnqueuedMessages: 50,
       });
-      
+    
       wsRef.current = ws;
-
-      // Enhanced connection initialization with retry and proper error handling
+  
       ws.addEventListener('open', () => {
         console.log('WebSocket connection established');
         setWsConnected(true);
         setWsRetrying(false);
         setWsError(null);
         setRetryCount(0);
-
-        const initConnection = async () => {
-          try {
-            // Check authentication status before initializing
-            const userResponse = await fetch('/api/user', { credentials: 'include' });
-            if (!userResponse.ok) {
-              console.error('Authentication check failed');
-              cleanup();
-              return;
-            }
-
-            ws.send(JSON.stringify({
-              type: 'init',
-              videoId,
-              timestamp: Date.now()
-            }));
-          } catch (err) {
-            console.error('Failed to initialize WebSocket:', err);
-            if (ws.readyState === WebSocket.OPEN) {
-              setTimeout(initConnection, 1000);
-            }
-          }
-        };
-        
-        initConnection();
+  
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'init',
+            videoId,
+            timestamp: Date.now()
+          }));
+        }
       });
-
-      // Enhanced message handling with authentication error handling
-      ws.addEventListener('message', async (event) => {
+  
+      ws.addEventListener('message', (event) => {
         try {
           const data = JSON.parse(event.data);
-          
+        
           if (data.type === 'error') {
             handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
             return;
           }
 
-        // Handle authentication errors
-        if (data.type === 'auth_error') {
-          console.log('Authentication error, attempting to refresh session');
-          try {
-            await mutateUser();
-            const userResponse = await fetch('/api/user', { credentials: 'include' });
-            if (!userResponse.ok) {
-              console.error('Failed to refresh authentication');
-              cleanup();
-              return;
-            }
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.reconnect();
-            }
-          } catch (err) {
-            console.error('Failed to refresh authentication:', err);
-            cleanup();
+          if (data.type === 'auth_error') {
+            console.log('Authentication error, attempting to refresh session');
+            mutateUser()
+              .then(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  cleanup();
+                  connectWebSocket();
+                }
+              })
+              .catch(() => {
+                console.error('Failed to refresh authentication');
+                cleanup();
+              });
+            return;
           }
-          return;
-        }
-
-        // Handle progress updates
-        if (data.type === 'progress' && data.videoId === videoId) {
-          setProgress(data.progress);
-          setProgressStage(data.stage);
-          setProgressMessage(data.message || "");
-          setProgressSubstage(data.substage || "");
-          
-          if (data.error) {
-            handleWebSocketError(new Error(data.error));
+  
+          if (data.type === 'progress') {
+            setProgress(data.progress);
+            setProgressMessage(data.message || '');
+            setProgressStage(data.stage);
+            setProgressSubstage(data.substage || '');
           }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
         }
-      } catch (err) {
-        console.error('Error handling WebSocket message:', err);
-      }
-    });
-
-    // Enhanced close handling with authentication failure detection
-    ws.addEventListener('close', (event) => {
-      console.log('WebSocket connection closed:', event.code, event.reason);
-      setWsConnected(false);
+      });
+  
+      ws.addEventListener('error', (error) => {
+        console.error('WebSocket error:', error);
+        handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection error'));
+      });
+  
+      ws.addEventListener('close', (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
+        setWsConnected(false);
       
-      if (event.code === 1000 || event.code === 1008 || event.code === 1011) {
-        console.log('WebSocket closed due to authentication or normal closure');
-        cleanup();
-        return;
-      }
-
-      if (retryCount >= WS_CONFIG.maxRetries) {
-        console.log('Max retries reached, stopping reconnection attempts');
-        cleanup();
-        return;
-      }
-
-      handleReconnect();
-    });
-
-    // Enhanced error handling
-    ws.addEventListener('error', (error) => {
-      console.error('WebSocket connection error:', error);
-      handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection failed'));
-    });
-
-  } catch (error) {
-    console.error('Failed to create WebSocket:', error);
-    handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket'));
-  }
-}, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, retryCount, mutateUser]);
+        if (event.code !== 1000) {
+          handleReconnect();
+        }
+      });
+  
+    } catch (error) {
+      console.error('Error creating WebSocket:', error);
+      handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket connection'));
+    }
+  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser]);
 
   useEffect(() => {
     connectWebSocket();

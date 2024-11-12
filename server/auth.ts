@@ -1,16 +1,15 @@
 import passport from "passport";
 import { IVerifyOptions, Strategy as LocalStrategy } from "passport-local";
-import { type Express, Request } from "express";
+import { Express, Request } from "express";
 import session from "express-session";
 import createMemoryStore from "memorystore";
 import { scrypt, randomBytes, timingSafeEqual } from "crypto";
 import { promisify } from "util";
-import { users, insertUserSchema, type User as SelectUser } from "db/schema";
+import { users, insertUserSchema, type User } from "db/schema";
 import { db } from "db";
 import { eq } from "drizzle-orm";
 import cookie from "cookie";
 import { createHash } from 'crypto';
-import { AuthenticatedSession } from "./types/express-session";
 
 const scryptAsync = promisify(scrypt);
 const crypto = {
@@ -33,109 +32,77 @@ const crypto = {
 
 declare global {
   namespace Express {
-    interface User extends SelectUser {}
+    interface User extends Omit<User, 'password'> {}
   }
 }
 
 export interface AuthenticatedRequest extends Request {
   user?: Express.User;
-  session: AuthenticatedSession;
+  session: session.Session & {
+    passport?: {
+      user: number;
+    };
+  } & {
+    cookie: session.Cookie;
+  };
 }
 
 const SECRET = process.env.REPL_ID || "watch-hour-secret";
 
-// Create memory store instance outside to be shared
 const sessionStore = new (createMemoryStore(session))({
-  checkPeriod: 86400000, // 24 hours
-  ttl: 24 * 60 * 60 * 1000, // 24 hours
+  checkPeriod: 86400000,
+  ttl: 24 * 60 * 60 * 1000,
   stale: false
 });
 
-// Verify session signature
-function verifySignature(signed: string, secret: string): string | false {
-  if (!signed) return false;
-  
-  const [versionTag, sessionId, hash] = signed.split('.');
-  if (!versionTag || !sessionId || !hash) {
+function verifySignature(cookieStr: string, secret: string): string | false {
+  try {
+    const cookies = cookie.parse(cookieStr);
+    const sessionCookie = cookies['watch-hour-session'];
+    
+    if (!sessionCookie || !sessionCookie.startsWith('s:')) {
+      return false;
+    }
+
+    const signedCookie = sessionCookie.slice(2);
+    const [value, signature] = signedCookie.split('.');
+    
+    if (!value || !signature) {
+      return false;
+    }
+
+    const expectedHash = createHash('sha256')
+      .update(value + secret)
+      .digest('base64')
+      .replace(/=+$/, '');
+
+    return timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHash)) ? value : false;
+  } catch (error) {
+    console.error('[Session Verify] Error:', error);
     return false;
   }
-
-  const expectedHash = createHash('sha256')
-    .update(versionTag + '.' + sessionId + secret)
-    .digest('base64')
-    .replace(/\=+$/, '');
-
-  return timingSafeEqual(Buffer.from(hash), Buffer.from(expectedHash)) ? sessionId : false;
 }
 
 export const authenticateWs = async (request: Request): Promise<AuthenticatedRequest | false> => {
   try {
-    // Step 1: Validate cookie header
-    console.log('[WebSocket Auth] Starting authentication process');
     const cookieHeader = request.headers.cookie;
     if (!cookieHeader) {
-      console.error('[WebSocket Auth] No cookies found in request');
       return false;
     }
 
-    // Step 2: Parse and validate cookies
-    let cookies;
-    try {
-      cookies = cookie.parse(cookieHeader);
-    } catch (err) {
-      console.error('[WebSocket Auth] Cookie parsing error:', err);
-      return false;
-    }
-
-    const sessionCookie = cookies['watch-hour-session'];
-    if (!sessionCookie) {
-      console.error('[WebSocket Auth] Session cookie not found');
-      return false;
-    }
-
-    // Step 3: Decode and verify session ID
-    console.log('[WebSocket Auth] Verifying session signature');
-    const decodedCookie = decodeURIComponent(sessionCookie);
-    const sessionId = verifySignature(decodedCookie, SECRET);
-
+    const sessionId = verifySignature(cookieHeader, SECRET);
     if (!sessionId) {
-      console.error('[WebSocket Auth] Invalid session signature');
       return false;
     }
 
-    // Step 4: Session store access and validation
     return new Promise((resolve) => {
-      console.log('[WebSocket Auth] Accessing session store');
       sessionStore.get(sessionId, async (err, session) => {
-        if (err) {
-          console.error('[WebSocket Auth] Session store error:', err);
-          resolve(false);
-          return;
-        }
-
-        if (!session) {
-          console.error('[WebSocket Auth] No session found in store');
-          resolve(false);
-          return;
-        }
-
-        // Step 5: Validate session data
-        if (!session.passport?.user) {
-          console.error('[WebSocket Auth] No user data in session');
-          resolve(false);
-          return;
-        }
-
-        // Step 6: Validate session expiration
-        if (session.cookie?.expires && new Date(session.cookie.expires) < new Date()) {
-          console.error('[WebSocket Auth] Session expired');
+        if (err || !session || !session.passport?.user) {
           resolve(false);
           return;
         }
 
         try {
-          // Step 7: Verify user exists in database
-          console.log('[WebSocket Auth] Verifying user in database');
           const [user] = await db
             .select()
             .from(users)
@@ -143,35 +110,27 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
             .limit(1);
 
           if (!user) {
-            console.error('[WebSocket Auth] User not found in database');
             resolve(false);
             return;
           }
 
-          // Step 8: Update session activity and extend expiration
-          const now = Date.now();
+          // Update session
           if (session.cookie) {
-            session.cookie.expires = new Date(now + (24 * 60 * 60 * 1000));
-            session.lastAccess = now;
+            session.cookie.expires = new Date(Date.now() + (24 * 60 * 60 * 1000));
           }
 
-          // Step 9: Save updated session
-          await new Promise<void>((resolveSession) => {
-            sessionStore.set(sessionId, session, (err) => {
-              if (err) {
-                console.error('[WebSocket Auth] Failed to update session:', err);
-              }
-              resolveSession();
-            });
+          sessionStore.set(sessionId, session, (err) => {
+            if (err) {
+              resolve(false);
+              return;
+            }
+
+            const { password: _, ...userWithoutPassword } = user;
+            const authenticatedRequest = request as AuthenticatedRequest;
+            authenticatedRequest.user = userWithoutPassword;
+            authenticatedRequest.session = session as AuthenticatedRequest['session'];
+            resolve(authenticatedRequest);
           });
-
-          // Step 10: Create authenticated request
-          const authenticatedRequest = request as AuthenticatedRequest;
-          authenticatedRequest.user = user;
-          authenticatedRequest.session = session as AuthenticatedSession;
-
-          console.log('[WebSocket Auth] Authentication successful');
-          resolve(authenticatedRequest);
         } catch (error) {
           console.error('[WebSocket Auth] Database error:', error);
           resolve(false);
