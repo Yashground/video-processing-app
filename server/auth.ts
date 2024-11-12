@@ -56,18 +56,26 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
     }
 
     const cookies = cookie.parse(cookieHeader);
-    const sessionId = cookies['watch-hour-session'];
+    const sessionCookie = cookies['watch-hour-session'];
     
-    if (!sessionId) {
+    if (!sessionCookie) {
       console.error('WebSocket authentication failed: no session cookie');
       return false;
     }
 
-    // Clean the session ID by removing the 's:' prefix and signature
-    const cleanSessionId = decodeURIComponent(sessionId.split('.')[0].replace(/^s:/, ''));
-    
+    // Parse and clean session ID more robustly
+    const sessionId = decodeURIComponent(sessionCookie)
+      .split('.')
+      .shift()
+      ?.replace(/^s:/, '') || '';
+
+    if (!sessionId) {
+      console.error('WebSocket authentication failed: invalid session ID format');
+      return false;
+    }
+
     return new Promise((resolve) => {
-      sessionStore.get(cleanSessionId, async (err, session) => {
+      sessionStore.get(sessionId, async (err, session) => {
         if (err) {
           console.error('Session store error:', err);
           resolve(false);
@@ -75,13 +83,13 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
         }
 
         if (!session) {
-          console.error('No session found for ID:', cleanSessionId);
+          console.error('No valid session found for ID:', sessionId);
           resolve(false);
           return;
         }
 
         if (!session.passport?.user) {
-          console.error('No user in session:', session);
+          console.error('No user data in session:', sessionId);
           resolve(false);
           return;
         }
@@ -99,7 +107,13 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
             return;
           }
 
-          // Attach user and session to request object
+          // Extend session TTL on successful authentication
+          sessionStore.touch(sessionId, session, (err) => {
+            if (err) {
+              console.error('Error extending session TTL:', err);
+            }
+          });
+
           const authenticatedRequest = request as AuthenticatedRequest;
           authenticatedRequest.user = user;
           authenticatedRequest.session = session as AuthenticatedSession;

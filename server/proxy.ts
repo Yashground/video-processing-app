@@ -10,11 +10,11 @@ export const setupProxy = (app: Express) => {
     changeOrigin: true,
     secure: false,
     xfwd: true,
-    proxyTimeout: 120000, // Increased timeout
-    timeout: 120000, // Increased timeout
+    proxyTimeout: 120000,
+    timeout: 120000,
     headers: {
       'Connection': 'keep-alive',
-      'Keep-Alive': 'timeout=120' // Match the timeout settings
+      'Keep-Alive': 'timeout=120'
     },
     onProxyReq: (proxyReq: any, req: IncomingMessage) => {
       // Copy cookies to proxy request
@@ -23,12 +23,16 @@ export const setupProxy = (app: Express) => {
       }
 
       // Handle WebSocket upgrade with improved headers
-      if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
+      if (req.headers.upgrade?.toLowerCase() === 'websocket') {
         proxyReq.setHeader('Connection', 'Upgrade');
         proxyReq.setHeader('Upgrade', 'websocket');
         proxyReq.setHeader('Sec-WebSocket-Version', '13');
         if (req.headers['sec-websocket-key']) {
           proxyReq.setHeader('Sec-WebSocket-Key', req.headers['sec-websocket-key']);
+        }
+        // Add origin header for WebSocket
+        if (req.headers.origin) {
+          proxyReq.setHeader('Origin', req.headers.origin);
         }
       }
     },
@@ -39,14 +43,18 @@ export const setupProxy = (app: Express) => {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie, Sec-WebSocket-Key, Sec-WebSocket-Version');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions');
         res.setHeader('Access-Control-Max-Age', '86400');
       }
 
       // Handle WebSocket upgrade response
-      if (proxyRes.headers.upgrade && proxyRes.headers.upgrade.toLowerCase() === 'websocket') {
+      if (proxyRes.headers.upgrade?.toLowerCase() === 'websocket') {
         proxyRes.headers.connection = 'Upgrade';
         proxyRes.headers['sec-websocket-accept'] = proxyRes.headers['sec-websocket-accept'];
+        // Add WebSocket protocol if present
+        if (proxyRes.headers['sec-websocket-protocol']) {
+          res.setHeader('Sec-WebSocket-Protocol', proxyRes.headers['sec-websocket-protocol']);
+        }
       }
 
       // Copy cookies from proxy response
@@ -88,7 +96,14 @@ export const setupProxy = (app: Express) => {
   // Handle WebSocket upgrade events with improved error handling
   app.on('upgrade', async (req: any, socket: any, head: any) => {
     try {
-      if (req.url?.startsWith('/progress')) {
+      const isWebSocketRequest = req.headers.upgrade?.toLowerCase() === 'websocket';
+      if (!isWebSocketRequest) {
+        socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      if (req.url?.startsWith('/api/ws/progress')) {
         // Apply authentication before upgrading
         const isAuthenticated = await authenticateWs(req);
         if (!isAuthenticated) {
@@ -97,19 +112,32 @@ export const setupProxy = (app: Express) => {
           return;
         }
 
-        // Set socket timeout
+        // Set socket timeout and keep-alive
         socket.setTimeout(120000);
         socket.setKeepAlive(true, 60000);
 
+        // Handle socket errors
+        socket.on('error', (err: Error) => {
+          console.error('WebSocket socket error:', err);
+          socket.destroy();
+        });
+
         // After authentication, handle the upgrade
         viteProxy.upgrade(req, socket, head);
-      }
-      
-      if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
+      } else if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
         // Set socket timeout for HMR connections
         socket.setTimeout(120000);
         socket.setKeepAlive(true, 60000);
+        
+        socket.on('error', (err: Error) => {
+          console.error('HMR WebSocket error:', err);
+          socket.destroy();
+        });
+
         viteProxy.upgrade(req, socket, head);
+      } else {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
       }
     } catch (error) {
       console.error('WebSocket upgrade error:', error);
