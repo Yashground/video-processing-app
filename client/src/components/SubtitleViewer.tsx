@@ -325,7 +325,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     });
   }, [toast]);
 
-  // Updated WebSocket Configuration with enhanced reconnection strategy
+  // Updated WebSocket Configuration
   const WS_CONFIG = {
     connectionTimeout: 8000,
     maxRetries: 5,
@@ -345,22 +345,45 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
   const isAuthenticated = !!user && !authError;
 
-  // Enhanced error handling for WebSocket
-  useEffect(() => {
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      console.error('Unhandled promise rejection:', event.reason);
-      if (event.reason?.message?.includes('WebSocket')) {
-        handleWebSocketError(new Error(event.reason.message));
-      }
-    };
-
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    return () => {
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-    };
+  const getWebSocketUrl = useCallback(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    return `${protocol}//${host}/api/ws/progress`;
   }, []);
 
-  // Updated connection logic with proper initialization timing
+  // First define cleanup
+  const cleanup = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = undefined;
+    }
+
+    if (wsRef.current) {
+      try {
+        wsRef.current.close(1000, 'Normal closure');
+      } catch (error) {
+        console.error('[WebSocket] Error during cleanup:', error);
+      } finally {
+        wsRef.current = null;
+      }
+    }
+
+    setWsConnected(false);
+    setWsRetrying(false);
+  }, []);
+
+  // Then define handleReconnect
+  const handleReconnect = useCallback(() => {
+    setWsRetrying(true);
+    setRetryCount((prev) => prev + 1);
+    reconnectTimeoutRef.current = setTimeout(() => {
+      if (connectWebSocket) {
+        connectWebSocket();
+      }
+    }, reconnectDelay);
+  }, [reconnectDelay]);
+
+  // Finally define connectWebSocket
   const connectWebSocket = useCallback(() => {
     if (!videoId || !isAuthenticated || wsRef.current) return;
 
@@ -370,12 +393,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     console.log('[WebSocket] Connecting to:', wsUrl);
   
     try {
-      const ws = new ReconnectingWebSocket(wsUrl, [], {
-        ...WS_CONFIG,
-        headers: {
-          'Cookie': document.cookie
-        }
-      });
+      const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
     
       wsRef.current = ws;
   
@@ -410,7 +428,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               .then(() => {
                 if (ws.readyState === WebSocket.OPEN) {
                   cleanup();
-                  setTimeout(connectWebSocket, 1000); // Delay reconnection
+                  setTimeout(connectWebSocket, 1000);
                 }
               })
               .catch((error) => {
@@ -451,32 +469,25 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       console.error('[WebSocket] Creation error:', error);
       handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket connection'));
     }
-  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser, retryCount]);
+  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser, retryCount, WS_CONFIG]);
 
-  // Enhanced cleanup with proper resource management
-  const cleanup = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = undefined;
-    }
-
-    if (wsRef.current) {
-      try {
-        wsRef.current.close(1000, 'Normal closure');
-      } catch (error) {
-        console.error('[WebSocket] Error during cleanup:', error);
-      } finally {
-        wsRef.current = null;
+  // Enhanced error handling for WebSocket
+  useEffect(() => {
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error('Unhandled promise rejection:', event.reason);
+      if (event.reason?.message?.includes('WebSocket')) {
+        handleWebSocketError(new Error(event.reason.message));
       }
-    }
+    };
 
-    setWsConnected(false);
-    setWsRetrying(false);
-  }, []);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, [handleWebSocketError]);
 
   // Updated initialization
   useEffect(() => {
-    // Delay initial connection to ensure proper initialization
     const initTimeout = setTimeout(() => {
       if (isAuthenticated && videoId) {
         connectWebSocket();
@@ -489,42 +500,11 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     };
   }, [connectWebSocket, cleanup, isAuthenticated, videoId]);
 
-  const handleReconnect = useCallback(() => {
-    if (!wsRef.current || retryCount >= WS_CONFIG.maxRetries) {
-      setWsRetrying(false);
-      return;
-    }
-    
-    setWsRetrying(true);
-    const delay = Math.min(
-      WS_CONFIG.minReconnectionDelay * Math.pow(WS_CONFIG.reconnectionDelayGrowFactor, retryCount),
-      WS_CONFIG.maxReconnectionDelay
-    );
-    
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
-    
-    reconnectTimeoutRef.current = setTimeout(() => {
-      if (wsRef.current) {
-        console.log(`Attempting reconnection ${retryCount + 1}/${WS_CONFIG.maxRetries}`);
-        wsRef.current.reconnect();
-        setRetryCount(prev => prev + 1);
-      }
-    }, delay);
-  }, [retryCount]);
-
-  const getWebSocketUrl = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    return `${protocol}//${host}/api/ws/progress`;
-  }, []);
-
+  // Add useEffect for updating text when subtitles change
   useEffect(() => {
     if (subtitles?.length && onTextUpdate) {
       const fullText = subtitles.map(s => s.text).join(' ');
       onTextUpdate(fullText);
-      setWordCount(fullText.split(/\s+/).length);
     }
   }, [subtitles, onTextUpdate]);
 
