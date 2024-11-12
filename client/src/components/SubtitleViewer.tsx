@@ -182,17 +182,34 @@ function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
   for (let i = 0; i < subtitles.length; i++) {
     const subtitle = subtitles[i];
     const timeGap = subtitle.start - lastEndTime;
+    const currentText = subtitle.text.trim();
+    
+    // Check for semantic breaks
+    const isSemanticBreak = currentText.startsWith('However,') || 
+                           currentText.startsWith('Moreover,') ||
+                           currentText.startsWith('Furthermore,') ||
+                           currentText.startsWith('In conclusion,') ||
+                           currentText.startsWith('Finally,');
+
+    // Check for natural pauses
+    const hasNaturalPause = timeGap > 1500; // 1.5 seconds
+
+    // Check for topic shifts (significant word changes)
+    const previousText = currentGroup[currentGroup.length - 1]?.text || '';
+    const isTopicShift = !hasCommonWords(previousText, currentText);
 
     // Start a new group if:
     // 1. Current group is empty
-    // 2. Time gap is more than 2 seconds (indicating a natural pause)
-    // 3. Current group has more than 5 sentences
-    // 4. Current sentence ends with a strong punctuation mark
+    // 2. There's a significant time gap (natural pause)
+    // 3. Current group has reached optimal size (3-5 sentences)
+    // 4. Previous sentence ends with strong punctuation and current starts new thought
+    // 5. There's a semantic break indicator
     const shouldStartNewGroup = 
       currentGroup.length === 0 ||
-      timeGap > 2000 || // 2 seconds
-      currentGroup.length >= 5 ||
-      /[.!?]\s*$/.test(currentGroup[currentGroup.length - 1]?.text || "");
+      hasNaturalPause ||
+      currentGroup.length >= 4 ||
+      (previousText.match(/[.!?]$/) && (isSemanticBreak || isTopicShift)) ||
+      isSemanticBreak;
 
     if (shouldStartNewGroup && currentGroup.length > 0) {
       groups.push([...currentGroup]);
@@ -208,6 +225,29 @@ function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
   }
 
   return groups;
+}
+
+// Helper function to check if two text segments share common significant words
+function hasCommonWords(text1: string, text2: string): boolean {
+  const getSignificantWords = (text: string): Set<string> => {
+    const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
+    return new Set(
+      text.toLowerCase()
+        .split(/\s+/)
+        .filter(word => word.length > 3 && !stopWords.has(word))
+    );
+  };
+
+  const words1 = getSignificantWords(text1);
+  const words2 = getSignificantWords(text2);
+  
+  let commonCount = 0;
+  for (const word of words1) {
+    if (words2.has(word)) commonCount++;
+  }
+  
+  // Return true if at least 20% of significant words are common
+  return commonCount >= Math.min(words1.size, words2.size) * 0.2;
 }
 
 function cleanAndJoinText(subtitles: Subtitle[]): string {
@@ -308,17 +348,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         cleanupWebSocket();
         setWsRetrying(true);
 
-        // Use port 5000 explicitly since that's where our server is running
+        // Use the current host and protocol for WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/progress`;
-        
-        // Include credentials in WebSocket connection
-        const ws = new WebSocket(wsUrl, {
-          headers: {
-            // Use the token from your global state or context 
-            Authorization: `Bearer ${localStorage.getItem('token')}`
-          }
-        });
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         const connectionTimeout = setTimeout(() => {
@@ -371,12 +404,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
+            handleWebSocketError(error);
           }
         });
 
         ws.addEventListener('error', (error) => {
           console.error('WebSocket error:', error);
           handleWebSocketError(error);
+          reject(error);
         });
 
         ws.addEventListener('close', (event) => {
@@ -384,8 +419,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           console.log('WebSocket closed:', event.code, event.reason);
           setWsConnected(false);
           
-          // Only retry if closure wasn't intentional
-          if (event.code !== 1000 && retryCount < 3) {
+          // Only retry if closure wasn't intentional and not unauthorized
+          if (event.code !== 1000 && event.code !== 1001 && event.code !== 1015 && retryCount < 3) {
             const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
             setWsRetrying(true);
             
@@ -493,6 +528,34 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       hover:border-primary/20
       hover:shadow-sm
       hover:translate-x-1
+      relative
+      before:content-['']
+      before:absolute
+      before:left-0
+      before:top-0
+      before:w-1
+      before:h-full
+      before:bg-primary/10
+      before:rounded-l-lg
+      before:transition-all
+      before:duration-300
+      hover:before:bg-primary/30
+    `,
+    paragraphGroup: `
+      relative
+      space-y-6
+      rounded-xl
+      bg-background/50
+      p-6
+      backdrop-blur-sm
+      transition-all
+      duration-300
+      hover:bg-background/70
+      border
+      border-border/5
+      hover:border-border/20
+      shadow-sm
+      hover:shadow-md
     `,
     section: "rounded-lg bg-card/50 p-8 shadow-sm border border-border/10 backdrop-blur-sm hover:bg-card/60 transition-colors duration-300",
     headingLarge: "text-2xl font-semibold mb-6 text-foreground/90 tracking-tight",
@@ -622,9 +685,29 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               </div>
             ) : subtitles && subtitles.length > 0 ? (
               <div className={textStyles.container}>
-                <div className={textStyles.textContainer}>
-                  {renderSubtitles()}
+                <div className="flex items-center justify-between mb-8">
+                  {/* Previous header content */}
                 </div>
+
+                <ScrollArea className="h-[600px] rounded-lg border bg-background/50 backdrop-blur-sm">
+                  <div className={textStyles.textContainer}>
+                    {groupSentencesByContext(subtitles).map((group, groupIndex) => (
+                      <div key={`group-${groupIndex}`} className={textStyles.paragraphGroup}>
+                        {group.map((subtitle, index) => (
+                          <div 
+                            key={`${subtitle.start}-${subtitle.end}`}
+                            className={textStyles.paragraph}
+                          >
+                            {subtitle.text}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  {wordCount > 0 && videoDuration > 0 && (
+                    <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
+                  )}
+                </ScrollArea>
               </div>
             ) : (
               <div className="p-8 text-center text-muted-foreground">
