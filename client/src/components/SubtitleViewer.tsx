@@ -375,11 +375,20 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     setWsConnected(false);
 
     // Show error toast with specific message
+    const errorDescription = errorMessage.includes('Authentication failed') 
+      ? 'Please log in to continue.'
+      : errorMessage;
+      
     toast({
       title: "Connection Error",
-      description: errorMessage,
+      description: errorDescription,
       variant: "destructive"
     });
+
+    // If authentication error, redirect to login
+    if (errorMessage.includes('Authentication failed')) {
+      window.location.href = '/login';
+    }
   };
 
   const connectWebSocket = () => {
@@ -390,7 +399,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         cleanupWebSocket();
         setWsRetrying(true);
 
-        // Construct WebSocket URL using current host
+        // Get the current host and construct WebSocket URL
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/progress`;
         
@@ -424,6 +433,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }
           }, 30000);
           
+          // Send initialization message with videoId
           ws.send(JSON.stringify({ type: 'init', videoId }));
           resolve();
         });
@@ -431,24 +441,34 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         ws.addEventListener('message', (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data.type === 'pong') return;
+            
+            // Handle different message types
+            switch(data.type) {
+              case 'pong':
+                return;
+              case 'error':
+                if (data.message?.includes('Authentication failed')) {
+                  handleWebSocketError(new Error('Authentication failed'));
+                  return;
+                }
+                break;
+              case 'auth_required':
+                window.location.href = '/login';
+                return;
+            }
 
-            const update: ProgressUpdate = data;
-            if (update.videoId === videoId) {
-              if (update.error) {
-                setWsError(new Error(update.error));
-                toast({
-                  title: "Processing Error",
-                  description: update.error,
-                  variant: "destructive"
-                });
-              } else {
-                setProgress(update.progress);
-                setProgressMessage(update.message || "");
-                setProgressStage(update.stage);
-                setProgressSubstage(update.substage || "");
-                setWsError(null);
+            // Handle progress updates
+            if (data.videoId === videoId) {
+              if (data.error) {
+                handleWebSocketError(new Error(data.error));
+                return;
               }
+              
+              setProgress(data.progress);
+              setProgressMessage(data.message || "");
+              setProgressStage(data.stage);
+              setProgressSubstage(data.substage || "");
+              setWsError(null);
             }
           } catch (error) {
             console.error('Error parsing WebSocket message:', error);
@@ -456,23 +476,28 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           }
         });
 
-        ws.addEventListener('error', (error) => {
-          console.error('WebSocket error:', error);
-          handleWebSocketError(error);
-          reject(error);
+        ws.addEventListener('error', (event) => {
+          console.error('WebSocket error:', event);
+          handleWebSocketError(event);
         });
 
         ws.addEventListener('close', (event) => {
           clearTimeout(connectionTimeout);
           console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
           setWsConnected(false);
-          
+
+          // Handle authentication failure
+          if (event.code === 1008) {
+            handleWebSocketError(new Error('Authentication failed'));
+            return;
+          }
+
           // Implement exponential backoff for reconnection
           if (event.code !== 1000 && event.code !== 1001 && retryCount < maxRetries) {
             const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
             setWsRetrying(true);
             setRetryCount(prev => prev + 1);
-            
+
             retryTimeoutRef.current = setTimeout(() => {
               connectWebSocket().catch(error => {
                 console.error('Reconnection failed:', error);
@@ -486,9 +511,9 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
                 }
               });
             }, retryDelay);
-          } else if (retryCount >= maxRetries) {
+          } else {
             setWsRetrying(false);
-            setWsError(new Error('Maximum retry attempts reached'));
+            handleWebSocketError(new Error('Connection closed'));
           }
         });
       } catch (error) {

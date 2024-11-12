@@ -8,6 +8,7 @@ import { promisify } from "util";
 import { users, insertUserSchema, type User as SelectUser } from "db/schema";
 import { db } from "db";
 import { eq } from "drizzle-orm";
+import cookie from "cookie";
 
 const scryptAsync = promisify(scrypt);
 const crypto = {
@@ -39,42 +40,62 @@ export interface AuthenticatedRequest extends Request {
   session: session.Session & { userId?: number };
 }
 
+// Create memory store instance outside to be shared
+const sessionStore = new (createMemoryStore(session))({
+  checkPeriod: 86400000,
+  ttl: 24 * 60 * 60 * 1000
+});
+
 export const authenticateWs = async (request: any): Promise<AuthenticatedRequest | false> => {
   try {
-    // Extract session ID from cookie
-    const cookies = request.headers.cookie?.split(';')
-      .map((cookie: string) => cookie.trim())
-      .reduce((acc: { [key: string]: string }, cookie: string) => {
-        const [key, value] = cookie.split('=');
-        acc[key] = value;
-        return acc;
-      }, {});
+    // Parse cookies using cookie library
+    const cookieHeader = request.headers.cookie;
+    if (!cookieHeader) {
+      console.log('WebSocket authentication failed: no cookies found');
+      return false;
+    }
 
-    const sessionId = cookies?.['watch-hour-session'];
+    const cookies = cookie.parse(cookieHeader);
+    const sessionId = cookies['watch-hour-session'];
+    
     if (!sessionId) {
       console.log('WebSocket authentication failed: no session cookie found');
       return false;
     }
 
-    // Get session data with promise wrapper
-    const sessionData = request.session;
-    if (!sessionData || !sessionData.passport?.user) {
-      console.log('WebSocket authentication failed: invalid session');
-      return false;
-    }
+    // Get session data from store
+    return new Promise((resolve) => {
+      sessionStore.get(sessionId, async (err, session) => {
+        if (err || !session || !session.passport?.user) {
+          console.log('WebSocket authentication failed: invalid session data');
+          resolve(false);
+          return;
+        }
 
-    const [user] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, sessionData.passport.user))
-      .limit(1);
+        try {
+          const [user] = await db
+            .select()
+            .from(users)
+            .where(eq(users.id, session.passport.user))
+            .limit(1);
 
-    if (!user) {
-      console.log('WebSocket authentication failed: user not found');
-      return false;
-    }
+          if (!user) {
+            console.log('WebSocket authentication failed: user not found');
+            resolve(false);
+            return;
+          }
 
-    return { ...request, user, session: sessionData };
+          resolve({
+            ...request,
+            user,
+            session
+          });
+        } catch (error) {
+          console.error('Database error during WebSocket authentication:', error);
+          resolve(false);
+        }
+      });
+    });
   } catch (error) {
     console.error('WebSocket authentication error:', error);
     return false;
@@ -82,11 +103,10 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
 };
 
 export function setupAuth(app: Express) {
-  const MemoryStore = createMemoryStore(session);
   const sessionSettings: session.SessionOptions = {
     secret: process.env.REPL_ID || "watch-hour-secret",
-    resave: true,
-    saveUninitialized: true,
+    resave: false,
+    saveUninitialized: false,
     name: 'watch-hour-session',
     cookie: {
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
@@ -95,10 +115,7 @@ export function setupAuth(app: Express) {
       path: '/',
       secure: app.get("env") === "production"
     },
-    store: new MemoryStore({
-      checkPeriod: 86400000, // prune expired entries every 24h
-      ttl: 24 * 60 * 60 * 1000 // Match cookie maxAge
-    }),
+    store: sessionStore
   };
 
   if (app.get("env") === "production") {

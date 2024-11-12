@@ -52,83 +52,83 @@ class ProgressTracker extends EventEmitter {
     this.wss = new WebSocketServer({
       server,
       path: '/progress',
-      clientTracking: true
+      verifyClient: async (info, callback) => {
+        try {
+          const authResult = await authenticate(info.req);
+          if (!authResult) {
+            console.log('WebSocket authentication failed');
+            callback(false, 401, 'Unauthorized');
+            return;
+          }
+          info.req.user = authResult.user;
+          info.req.session = authResult.session;
+          callback(true);
+        } catch (error) {
+          console.error('WebSocket authentication error:', error);
+          callback(false, 500, 'Internal Server Error');
+        }
+      }
     });
 
     this.wss.on('connection', async (ws, req) => {
-      console.log('New WebSocket connection attempt');
+      console.log('New WebSocket connection authenticated');
       
-      try {
-        const authResult = await authenticate(req);
-        if (!authResult) {
-          console.log('WebSocket authentication failed');
-          ws.close(1008, 'Authentication failed');
-          return;
-        }
-
-        console.log('Client authenticated and connected to progress WebSocket');
-        
-        // Set up heartbeat handling
-        this.handleHeartbeat(ws);
-        
-        // Send initial progress state
-        this.progressMap.forEach((progress) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            try {
-              ws.send(JSON.stringify(progress));
-            } catch (error) {
-              console.error('Error sending initial progress:', error);
-            }
-          }
-        });
-
-        ws.on('pong', () => {
-          this.handleHeartbeat(ws);
-        });
-
-        ws.on('message', (data) => {
+      // Set up heartbeat handling
+      this.handleHeartbeat(ws);
+      
+      // Send initial progress state
+      this.progressMap.forEach((progress) => {
+        if (ws.readyState === WebSocket.OPEN) {
           try {
-            const message = JSON.parse(data.toString());
-            if (message.type === 'ping') {
-              ws.send(JSON.stringify({ type: 'pong' }));
-              this.handleHeartbeat(ws);
-            }
+            ws.send(JSON.stringify(progress));
           } catch (error) {
-            console.error('Error handling WebSocket message:', error);
+            console.error('Error sending initial progress:', error);
           }
-        });
+        }
+      });
 
-        ws.on('error', (error) => {
-          console.error('WebSocket error:', error);
-          this.cleanup(ws);
-        });
+      ws.on('pong', () => {
+        this.handleHeartbeat(ws);
+      });
 
-        ws.on('close', (code, reason) => {
-          console.log(`Client disconnected from progress WebSocket: ${code} - ${reason}`);
-          this.cleanup(ws);
-        });
+      ws.on('message', (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'ping') {
+            ws.send(JSON.stringify({ type: 'pong' }));
+            this.handleHeartbeat(ws);
+          }
+        } catch (error) {
+          console.error('Error handling WebSocket message:', error);
+        }
+      });
 
-        // Setup heartbeat interval
-        const heartbeatInterval = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            try {
-              ws.ping();
-            } catch (error) {
-              console.error('Error sending ping:', error);
-              clearInterval(heartbeatInterval);
-              this.cleanup(ws);
-            }
-          } else {
+      ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+        this.cleanup(ws);
+      });
+
+      ws.on('close', (code, reason) => {
+        console.log(`Client disconnected from progress WebSocket: ${code} - ${reason}`);
+        this.cleanup(ws);
+      });
+
+      // Setup heartbeat interval
+      const heartbeatInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.ping();
+          } catch (error) {
+            console.error('Error sending ping:', error);
             clearInterval(heartbeatInterval);
+            this.cleanup(ws);
           }
-        }, this.HEARTBEAT_INTERVAL);
+        } else {
+          clearInterval(heartbeatInterval);
+        }
+      }, this.HEARTBEAT_INTERVAL);
 
-        ws.on('close', () => clearInterval(heartbeatInterval));
-
-      } catch (error) {
-        console.error('Error in WebSocket connection:', error);
-        ws.close(1011, 'Internal Server Error');
-      }
+      ws.on('close', () => clearInterval(heartbeatInterval));
     });
 
     this.wss.on('error', (error) => {
