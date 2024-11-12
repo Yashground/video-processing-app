@@ -324,21 +324,11 @@ export function registerRoutes(app: Express) {
 
     } catch (error) {
       console.error('Error processing video:', error);
-      if (error instanceof Error) {
-        // Check for specific error types and provide appropriate responses
-        if (error.message.includes('Queue is full')) {
-          return res.status(503).json({
-            message: 'Processing queue is full. Please try again later.',
-            retryAfter: 300 // Suggest retry after 5 minutes
-          });
-        } else if (error.message.includes('already being processed')) {
-          return res.status(409).json({
-            message: 'Video is already being processed',
-            queuePosition: processingQueue.getQueuePosition(videoId)
-          });
-        }
-      }
-      throw error;
+      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+      return res.status(500).json({
+        error: errorMessage,
+        message: 'Failed to process video'
+      });
     }
 
     try {

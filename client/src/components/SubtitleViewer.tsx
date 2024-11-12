@@ -304,17 +304,26 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const maxRetries = 5;
 
+  const handleWebSocketError = useCallback((error: Error) => {
+    console.error('WebSocket error:', error);
+    setWsError(error);
+    toast({
+      title: "Connection Error",
+      description: error.message,
+      variant: "destructive",
+    });
+  }, [toast]);
+
   // WebSocket Configuration
   const WS_CONFIG = {
-    connectionTimeout: 10000, // Reduced from 15000
+    connectionTimeout: 10000,
     maxRetries: maxRetries,
     minReconnectionDelay: 1000,
-    maxReconnectionDelay: 10000, // Reduced from 30000
-    reconnectionDelayGrowFactor: 1.3, // Reduced from 1.5
-    heartbeatInterval: 15000, // Reduced from 30000
+    maxReconnectionDelay: 10000,
+    reconnectionDelayGrowFactor: 1.3,
+    heartbeatInterval: 15000,
   };
 
-  // Add authentication state management
   const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
   const isAuthenticated = !!user && !authError;
 
@@ -327,6 +336,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     reconnectTimeoutRef.current = setTimeout(() => {
       if (wsRef.current) {
         wsRef.current.reconnect();
+        setRetryCount(prev => prev + 1);
       }
     }, delay);
   }, [retryCount, maxRetries]);
@@ -356,29 +366,31 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       setWsError(null);
       setRetryCount(0);
 
-      // Send initialization message with auth token
-      ws.send(JSON.stringify({
-        type: 'init',
-        videoId,
-        timestamp: Date.now()
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: 'init',
+          videoId,
+          timestamp: Date.now()
+        }));
 
-      // Setup heartbeat
-      const heartbeatInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
-          } catch (error) {
-            console.error('Heartbeat error:', error);
+        const heartbeatInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            try {
+              ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+            } catch (err) {
+              console.error('Heartbeat error:', err);
+              clearInterval(heartbeatInterval);
+              handleReconnect();
+            }
+          } else {
             clearInterval(heartbeatInterval);
-            handleReconnect();
           }
-        } else {
-          clearInterval(heartbeatInterval);
-        }
-      }, WS_CONFIG.heartbeatInterval);
+        }, WS_CONFIG.heartbeatInterval);
 
-      ws.heartbeatInterval = heartbeatInterval;
+        ws.heartbeatInterval = heartbeatInterval;
+      } catch (err) {
+        handleWebSocketError(err instanceof Error ? err : new Error('Failed to initialize WebSocket'));
+      }
     });
 
     ws.addEventListener('message', (event) => {
@@ -386,7 +398,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         const data = JSON.parse(event.data);
         
         if (data.type === 'error') {
-          handleWebSocketError(new Error(data.message));
+          handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
           return;
         }
 
@@ -410,8 +422,9 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             handleWebSocketError(new Error(data.error));
           }
         }
-      } catch (error) {
-        console.error('Error handling WebSocket message:', error);
+      } catch (err) {
+        console.error('Error handling WebSocket message:', err);
+        handleWebSocketError(err instanceof Error ? err : new Error('Failed to process WebSocket message'));
       }
     });
 
@@ -421,7 +434,6 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       clearInterval(ws.heartbeatInterval);
       
       if (event.code === 1000) {
-        // Normal closure
         console.log('WebSocket closed normally');
         return;
       }
@@ -433,7 +445,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           handleReconnect();
         } else {
           console.error('Max retry attempts reached');
-          setWsError(new Error('Unable to establish connection after multiple attempts'));
+          handleWebSocketError(new Error('Unable to establish connection after multiple attempts'));
         }
       }
     });
@@ -448,13 +460,10 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             handleReconnect();
           }
         });
-      } else if (retryCount === 0) {
-        console.error('Initial WebSocket connection failed:', event);
       } else {
-        console.error('Retry failed:', event);
+        handleWebSocketError(new Error(errorMessage));
       }
       
-      setWsError(new Error(errorMessage));
       setWsConnected(false);
     });
 
@@ -467,23 +476,21 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       }
       ws.close(1000, "Cleanup");
     };
-  }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser]);
+  }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser, handleWebSocketError]);
 
-  // Effect for connection management
   useEffect(() => {
     if (videoId && isAuthenticated) {
-      connectWebSocket();
+      const cleanup = connectWebSocket();
+      return () => {
+        cleanup?.();
+        if (wsRef.current) {
+          wsRef.current.close(1000, "Normal closure");
+          wsRef.current = null;
+        }
+      };
     }
-    
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close(1000, "Normal closure");
-        wsRef.current = null;
-      }
-    };
   }, [videoId, isAuthenticated, connectWebSocket]);
 
-  // Handle subtitles rendering
   if (!videoId) {
     return null;
   }

@@ -372,6 +372,13 @@ class ProgressTracker extends EventEmitter {
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: error instanceof Error ? error.message : 'An unknown error occurred',
+          message: 'Failed to process WebSocket message'
+        }));
+      }
     }
   }
 
@@ -455,9 +462,19 @@ class ProgressTracker extends EventEmitter {
       videoId,
       stage: stage || 'processing',
       progress: 0,
-      error
+      error: error,
+      message: 'An error occurred during processing'
     };
     this.emit('progress', update);
+    
+    // Broadcast error to all connected clients
+    this.broadcast(JSON.stringify({
+      type: 'error',
+      videoId,
+      error: error,
+      message: 'Video processing failed'
+    }));
+    
     this.progressMap.delete(videoId);
   }
 
