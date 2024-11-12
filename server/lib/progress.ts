@@ -13,6 +13,12 @@ export interface ProgressUpdate {
   substage?: string;
 }
 
+interface WebSocketWithId extends WebSocket {
+  id?: string;
+  isAlive?: boolean;
+  userId?: string;
+}
+
 class ProgressTracker extends EventEmitter {
   private static instance: ProgressTracker;
   private wss: WebSocketServer | null = null;
@@ -20,6 +26,8 @@ class ProgressTracker extends EventEmitter {
   private clientHeartbeats: Map<WebSocket, NodeJS.Timeout> = new Map();
   private readonly HEARTBEAT_INTERVAL = 10000;
   private readonly HEARTBEAT_TIMEOUT = 30000;
+  private readonly MAX_CLIENTS_PER_USER = 5;
+  private userConnections: Map<string, Set<WebSocketWithId>> = new Map();
 
   private constructor() {
     super();
@@ -32,7 +40,7 @@ class ProgressTracker extends EventEmitter {
     return ProgressTracker.instance;
   }
 
-  private handleHeartbeat(ws: WebSocket) {
+  private handleHeartbeat(ws: WebSocketWithId) {
     if (this.clientHeartbeats.has(ws)) {
       clearTimeout(this.clientHeartbeats.get(ws)!);
     }
@@ -63,6 +71,14 @@ class ProgressTracker extends EventEmitter {
             return;
           }
 
+          // Check connection limit per user
+          const userId = authResult.user?.id;
+          const userConnections = this.userConnections.get(userId) || new Set();
+          if (userConnections.size >= this.MAX_CLIENTS_PER_USER) {
+            callback(false, 429, 'Too many connections');
+            return;
+          }
+
           // Store authenticated user info in the request object
           Object.assign(info.req, {
             user: authResult.user,
@@ -77,9 +93,22 @@ class ProgressTracker extends EventEmitter {
       }
     });
 
-    this.wss.on('connection', (ws: WebSocket, req: AuthenticatedRequest) => {
+    this.wss.on('connection', (ws: WebSocketWithId, req: AuthenticatedRequest) => {
       const userId = req.user?.id;
       console.log('New WebSocket connection established for user:', userId);
+
+      // Set up connection tracking
+      ws.id = Math.random().toString(36).substring(2, 15);
+      ws.userId = userId;
+      ws.isAlive = true;
+
+      // Add to user connections
+      if (userId) {
+        if (!this.userConnections.has(userId)) {
+          this.userConnections.set(userId, new Set());
+        }
+        this.userConnections.get(userId)?.add(ws);
+      }
 
       // Set up heartbeat handling
       this.handleHeartbeat(ws);
@@ -139,8 +168,8 @@ class ProgressTracker extends EventEmitter {
       }, this.HEARTBEAT_INTERVAL);
 
       // Handle connection close
-      ws.on('close', (code, reason) => {
-        console.log(`WebSocket connection closed for user ${userId}:`, code, reason);
+      ws.on('close', () => {
+        console.log(`WebSocket connection closed for user ${userId}`);
         clearInterval(heartbeatInterval);
         this.cleanup(ws);
       });
@@ -168,12 +197,25 @@ class ProgressTracker extends EventEmitter {
     });
   }
 
-  private cleanup(ws: WebSocket) {
+  private cleanup(ws: WebSocketWithId) {
+    // Remove from heartbeat tracking
     if (this.clientHeartbeats.has(ws)) {
       clearTimeout(this.clientHeartbeats.get(ws)!);
       this.clientHeartbeats.delete(ws);
     }
 
+    // Remove from user connections
+    if (ws.userId) {
+      const userConnections = this.userConnections.get(ws.userId);
+      if (userConnections) {
+        userConnections.delete(ws);
+        if (userConnections.size === 0) {
+          this.userConnections.delete(ws.userId);
+        }
+      }
+    }
+
+    // Close connection if still open
     if (ws.readyState === WebSocket.OPEN) {
       try {
         ws.close(1000, 'Normal closure');
@@ -197,7 +239,7 @@ class ProgressTracker extends EventEmitter {
           client.send(message);
         } catch (error) {
           console.error('Error broadcasting message:', error);
-          this.cleanup(client);
+          this.cleanup(client as WebSocketWithId);
         }
       }
     });
