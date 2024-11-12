@@ -43,15 +43,16 @@ export interface AuthenticatedRequest extends Request {
 
 // Create memory store instance outside to be shared
 const sessionStore = new (createMemoryStore(session))({
-  checkPeriod: 86400000,
-  ttl: 24 * 60 * 60 * 1000
+  checkPeriod: 86400000, // 24 hours
+  ttl: 24 * 60 * 60 * 1000, // 24 hours
+  stale: false
 });
 
 export const authenticateWs = async (request: Request): Promise<AuthenticatedRequest | false> => {
   try {
     const cookieHeader = request.headers.cookie;
     if (!cookieHeader) {
-      console.error('WebSocket authentication failed: no cookies found');
+      console.error('[WebSocket Auth] No cookies found in request');
       return false;
     }
 
@@ -59,41 +60,29 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
     const sessionCookie = cookies['watch-hour-session'];
     
     if (!sessionCookie) {
-      console.error('WebSocket authentication failed: no session cookie');
+      console.error('[WebSocket Auth] Session cookie not found');
       return false;
     }
 
-    // Enhanced session ID parsing with validation
-    const sessionMatch = sessionCookie.match(/^s:([^.]+)\./);
+    const decodedCookie = decodeURIComponent(sessionCookie);
+    const sessionMatch = decodedCookie.match(/^s:([^.]+)/);
     const sessionId = sessionMatch ? sessionMatch[1] : '';
 
-    if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
-      console.error('WebSocket authentication failed: invalid session ID format');
+    if (!sessionId) {
+      console.error('[WebSocket Auth] Invalid session ID format');
       return false;
     }
 
     return new Promise((resolve) => {
       sessionStore.get(sessionId, async (err, session) => {
-        if (err) {
-          console.error('Session store error:', err);
-          resolve(false);
-          return;
-        }
-
-        if (!session) {
-          console.error('No valid session found for ID:', sessionId);
-          // Clean up invalid session
-          sessionStore.destroy(sessionId, (destroyErr) => {
-            if (destroyErr) {
-              console.error('Error destroying invalid session:', destroyErr);
-            }
-          });
+        if (err || !session) {
+          console.error('[WebSocket Auth] Session error:', err || 'No session found');
           resolve(false);
           return;
         }
 
         if (!session.passport?.user) {
-          console.error('No user data in session:', sessionId);
+          console.error('[WebSocket Auth] No user data in session');
           resolve(false);
           return;
         }
@@ -106,17 +95,24 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
             .limit(1);
 
           if (!user) {
-            console.error('User not found in database:', session.passport.user);
+            console.error('[WebSocket Auth] User not found in database');
             resolve(false);
             return;
           }
 
-          // Extend session TTL and update last activity
-          session.lastActivity = Date.now();
-          sessionStore.set(sessionId, session, (err) => {
-            if (err) {
-              console.error('Error extending session TTL:', err);
-            }
+          // Update session activity
+          const now = Date.now();
+          if (session.cookie) {
+            session.cookie.expires = new Date(now + (24 * 60 * 60 * 1000));
+          }
+
+          await new Promise<void>((resolveSession) => {
+            sessionStore.set(sessionId, session, (err) => {
+              if (err) {
+                console.error('[WebSocket Auth] Failed to update session');
+              }
+              resolveSession();
+            });
           });
 
           const authenticatedRequest = request as AuthenticatedRequest;
@@ -125,13 +121,13 @@ export const authenticateWs = async (request: Request): Promise<AuthenticatedReq
 
           resolve(authenticatedRequest);
         } catch (error) {
-          console.error('Database error during WebSocket authentication:', error);
+          console.error('[WebSocket Auth] Database error:', error);
           resolve(false);
         }
       });
     });
   } catch (error) {
-    console.error('WebSocket authentication error:', error);
+    console.error('[WebSocket Auth] Unexpected error:', error);
     return false;
   }
 };

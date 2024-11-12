@@ -325,29 +325,32 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     });
   }, [toast]);
 
-  // Updated WebSocket Configuration
+  // Updated WebSocket Configuration with enhanced reconnection strategy
   const WS_CONFIG = {
-    connectionTimeout: 10000, // Reduced from 15000
+    connectionTimeout: 8000, // Reduced from 10000
     maxRetries: 5,
-    minReconnectionDelay: 2000,
-    maxReconnectionDelay: 10000, // Reduced from 30000
-    reconnectionDelayGrowFactor: 1.2, // Reduced from 1.5
+    minReconnectionDelay: 1000,
+    maxReconnectionDelay: 30000,
+    reconnectionDelayGrowFactor: 2,
     debug: process.env.NODE_ENV === 'development',
-    timeoutInterval: 5000, // Reduced from 10000
-    maxEnqueuedMessages: 50, // Reduced from 100
+    timeoutInterval: 5000,
+    maxEnqueuedMessages: 50,
   };
 
   const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
   const isAuthenticated = !!user && !authError;
 
   const handleReconnect = useCallback(() => {
-    if (!wsRef.current || retryCount >= maxRetries) {
+    if (!wsRef.current || retryCount >= WS_CONFIG.maxRetries) {
       setWsRetrying(false);
       return;
     }
     
     setWsRetrying(true);
-    const delay = Math.min(reconnectDelay * Math.pow(2, retryCount), WS_CONFIG.maxReconnectionDelay);
+    const delay = Math.min(
+      WS_CONFIG.minReconnectionDelay * Math.pow(WS_CONFIG.reconnectionDelayGrowFactor, retryCount),
+      WS_CONFIG.maxReconnectionDelay
+    );
     
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -355,31 +358,33 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     
     reconnectTimeoutRef.current = setTimeout(() => {
       if (wsRef.current) {
-        console.log(`Attempting reconnection ${retryCount + 1}/${maxRetries}`);
+        console.log(`Attempting reconnection ${retryCount + 1}/${WS_CONFIG.maxRetries}`);
         wsRef.current.reconnect();
         setRetryCount(prev => prev + 1);
       }
     }, delay);
-  }, [retryCount, maxRetries, reconnectDelay]);
+  }, [retryCount]);
 
   const cleanup = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
     }
     if (wsRef.current) {
-      wsRef.current.close();
+      wsRef.current.close(1000, 'Normal closure');
       wsRef.current = null;
     }
     setWsConnected(false);
     setWsRetrying(false);
   }, []);
 
+  // Update the getWebSocketUrl function to handle port correctly
   const getWebSocketUrl = useCallback(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
+    const host = window.location.host; // Use host instead of hostname:port
     return `${protocol}//${host}/api/ws/progress`;
   }, []);
 
+  // Update WebSocket initialization
   const connectWebSocket = useCallback(() => {
     if (!videoId || !isAuthenticated || wsRef.current) return;
 
@@ -391,17 +396,13 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     try {
       const ws = new ReconnectingWebSocket(wsUrl, [], {
         ...WS_CONFIG,
-        shouldReconnect: (closeEvent) => {
-          // Don't reconnect on normal closure or unauthorized
-          if (closeEvent.code === 1000 || closeEvent.code === 1008) {
-            return false;
-          }
-          return retryCount < WS_CONFIG.maxRetries;
-        },
+        // Remove custom headers as they're not supported in the browser
+        protocols: ['watch-hour-protocol']
       });
       
       wsRef.current = ws;
 
+      // Enhanced connection initialization with retry and proper error handling
       ws.addEventListener('open', () => {
         console.log('WebSocket connection established');
         setWsConnected(true);
@@ -409,7 +410,6 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         setWsError(null);
         setRetryCount(0);
 
-        // Add connection initialization with retry
         const initConnection = () => {
           try {
             ws.send(JSON.stringify({
@@ -419,14 +419,16 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }));
           } catch (err) {
             console.error('Failed to initialize WebSocket:', err);
-            setTimeout(initConnection, 1000);
+            if (ws.readyState === WebSocket.OPEN) {
+              setTimeout(initConnection, 1000);
+            }
           }
         };
         
         initConnection();
       });
 
-      ws.addEventListener('message', (event) => {
+      ws.addEventListener('message', async (event) => {
         try {
           const data = JSON.parse(event.data);
           
@@ -437,11 +439,15 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
 
           if (data.type === 'auth_required') {
             console.log('Authentication refresh required');
-            mutateUser().then(() => {
+            try {
+              await mutateUser();
               if (ws.readyState === WebSocket.OPEN) {
                 ws.reconnect();
               }
-            });
+            } catch (err) {
+              console.error('Failed to refresh authentication:', err);
+              cleanup();
+            }
             return;
           }
 
@@ -464,6 +470,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         console.log('WebSocket connection closed:', event.code, event.reason);
         setWsConnected(false);
         
+        // Don't reconnect on authentication failures or normal closure
         if (event.code === 1000 || event.code === 1008) {
           console.log('WebSocket closed normally or unauthorized');
           cleanup();
@@ -479,7 +486,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         handleReconnect();
       });
 
-      ws.addEventListener('error', () => {
+      ws.addEventListener('error', (error) => {
+        console.error('WebSocket connection error:', error);
         setWsConnected(false);
         handleReconnect();
       });
@@ -491,7 +499,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       console.error('Error creating WebSocket:', error);
       handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket'));
     }
-  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, retryCount]);
+  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect]);
 
   useEffect(() => {
     connectWebSocket();
