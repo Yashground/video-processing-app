@@ -19,6 +19,7 @@ interface WebSocketWithId extends WebSocket {
   userId?: string;
   lastPing?: number;
   heartbeatInterval?: NodeJS.Timeout;
+  reconnectAttempts?: number;
 }
 
 interface ConnectionPool {
@@ -31,12 +32,14 @@ class ProgressTracker extends EventEmitter {
   private static instance: ProgressTracker;
   private wss: WebSocketServer | null = null;
   private progressMap: Map<string, ProgressUpdate> = new Map();
-  private readonly HEARTBEAT_INTERVAL = 15000; // Reduced from 30000
-  private readonly HEARTBEAT_TIMEOUT = 45000; // Increased from 30000
+  private readonly HEARTBEAT_INTERVAL = 10000; // Reduced from 15000
+  private readonly HEARTBEAT_TIMEOUT = 30000; // Reduced from 45000
   private readonly MAX_CLIENTS_PER_USER = 5;
-  private readonly MAX_POOL_SIZE = 500; // Reduced from 1000
-  private readonly POOL_REBALANCE_INTERVAL = 30000; // Reduced from 60000
-  private readonly STALE_CONNECTION_TIMEOUT = 180000; // Reduced from 300000
+  private readonly MAX_POOL_SIZE = 250; // Reduced from 500
+  private readonly POOL_REBALANCE_INTERVAL = 15000; // Reduced from 30000
+  private readonly STALE_CONNECTION_TIMEOUT = 60000; // Reduced from 180000
+  private readonly MAX_RECONNECT_ATTEMPTS = 3;
+  private readonly RECONNECT_DELAY = 1000;
 
   private userConnections: Map<string, Set<WebSocketWithId>> = new Map();
   private connectionPools: Map<string, ConnectionPool> = new Map();
@@ -55,6 +58,10 @@ class ProgressTracker extends EventEmitter {
   }
 
   private startPoolRebalancing() {
+    if (this.poolRebalanceInterval) {
+      clearInterval(this.poolRebalanceInterval);
+    }
+    
     this.poolRebalanceInterval = setInterval(() => {
       this.rebalanceConnectionPools();
     }, this.POOL_REBALANCE_INTERVAL);
@@ -66,7 +73,11 @@ class ProgressTracker extends EventEmitter {
     // Clean up stale connections
     for (const [poolId, pool] of this.connectionPools) {
       const staleConnections = Array.from(pool.connections)
-        .filter(ws => now - (ws.lastPing || 0) > this.STALE_CONNECTION_TIMEOUT);
+        .filter(ws => {
+          const isStale = now - (ws.lastPing || 0) > this.STALE_CONNECTION_TIMEOUT;
+          const isInactive = ws.readyState !== WebSocket.OPEN;
+          return isStale || isInactive;
+        });
       
       for (const ws of staleConnections) {
         console.log(`Cleaning up stale connection in pool ${poolId}`);
@@ -90,7 +101,9 @@ class ProgressTracker extends EventEmitter {
   }
 
   private redistributeConnections(sourcePool: ConnectionPool) {
-    const connections = Array.from(sourcePool.connections);
+    const connections = Array.from(sourcePool.connections)
+      .filter(ws => ws.readyState === WebSocket.OPEN);
+    
     const targetPools = Array.from(this.connectionPools.values())
       .filter(p => p.id !== sourcePool.id && p.connections.size < this.MAX_POOL_SIZE);
     
@@ -114,10 +127,11 @@ class ProgressTracker extends EventEmitter {
     );
     
     for (const pool of pools) {
-      if (pool.connections.size > avgPoolSize + 3) { // Reduced threshold from 5
+      if (pool.connections.size > avgPoolSize + 2) { // Reduced threshold from 3
         const excessConnections = Array.from(pool.connections)
           .slice(avgPoolSize)
-          .slice(0, pool.connections.size - avgPoolSize);
+          .slice(0, pool.connections.size - avgPoolSize)
+          .filter(ws => ws.readyState === WebSocket.OPEN);
         
         for (const conn of excessConnections) {
           const targetPool = pools.find(p => p.connections.size < avgPoolSize);
@@ -137,14 +151,17 @@ class ProgressTracker extends EventEmitter {
     let minConnections = Infinity;
 
     for (const pool of this.connectionPools.values()) {
-      if (pool.connections.size < minConnections && pool.connections.size < this.MAX_POOL_SIZE) {
+      const activeConnections = Array.from(pool.connections)
+        .filter(ws => ws.readyState === WebSocket.OPEN).length;
+      
+      if (activeConnections < minConnections && activeConnections < this.MAX_POOL_SIZE) {
         targetPool = pool;
-        minConnections = pool.connections.size;
+        minConnections = activeConnections;
       }
     }
 
     // Create new pool if needed
-    if (!targetPool || targetPool.connections.size >= this.MAX_POOL_SIZE) {
+    if (!targetPool || minConnections >= this.MAX_POOL_SIZE) {
       const poolId = `pool-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       targetPool = {
         id: poolId,
@@ -160,6 +177,7 @@ class ProgressTracker extends EventEmitter {
   private handleHeartbeat(ws: WebSocketWithId) {
     ws.isAlive = true;
     ws.lastPing = Date.now();
+    ws.reconnectAttempts = 0; // Reset reconnect attempts on successful heartbeat
 
     // Clear existing heartbeat timeout
     if (ws.heartbeatInterval) {
@@ -168,9 +186,19 @@ class ProgressTracker extends EventEmitter {
 
     // Set new heartbeat timeout
     ws.heartbeatInterval = setTimeout(() => {
-      console.log('Client heartbeat timeout, closing connection');
-      this.cleanup(ws);
-    }, this.HEARTBEAT_TIMEOUT);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.ping();
+        // Set a timeout to close the connection if no pong is received
+        setTimeout(() => {
+          if (ws.isAlive === false) {
+            console.log('Client heartbeat timeout, closing connection');
+            this.cleanup(ws);
+          }
+        }, 5000);
+      } else {
+        this.cleanup(ws);
+      }
+    }, this.HEARTBEAT_INTERVAL);
   }
 
   initializeWebSocket(server: Server, authenticate: (request: IncomingMessage) => Promise<AuthenticatedRequest | false>) {
@@ -213,7 +241,8 @@ class ProgressTracker extends EventEmitter {
           console.error('WebSocket authentication error:', error);
           callback(false, 500, 'Internal Server Error');
         }
-      }
+      },
+      clientTracking: true
     });
 
     this.wss.on('connection', (ws: WebSocketWithId, req: AuthenticatedRequest) => {
@@ -229,6 +258,7 @@ class ProgressTracker extends EventEmitter {
       ws.userId = userId;
       ws.isAlive = true;
       ws.lastPing = Date.now();
+      ws.reconnectAttempts = 0;
 
       // Add to connection pool
       const pool = this.getOrCreatePool();
@@ -241,6 +271,11 @@ class ProgressTracker extends EventEmitter {
       this.userConnections.get(userId)?.add(ws);
 
       // Setup heartbeat handling
+      ws.on('pong', () => {
+        ws.isAlive = true;
+        this.handleHeartbeat(ws);
+      });
+
       this.handleHeartbeat(ws);
 
       // Send initial state
@@ -252,15 +287,24 @@ class ProgressTracker extends EventEmitter {
       ws.on('message', (data) => this.handleMessage(ws, data));
 
       // Handle connection close
-      ws.on('close', () => {
-        console.log(`WebSocket connection closed for user ${userId}`);
+      ws.on('close', (code, reason) => {
+        console.log(`WebSocket connection closed for user ${userId}:`, code, reason.toString());
         this.cleanup(ws);
       });
 
       // Handle errors
       ws.on('error', (error) => {
         console.error(`WebSocket error for user ${userId}:`, error);
-        this.cleanup(ws);
+        if (ws.reconnectAttempts && ws.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
+          ws.reconnectAttempts++;
+          setTimeout(() => {
+            if (ws.readyState === WebSocket.CLOSED) {
+              this.cleanup(ws);
+            }
+          }, this.RECONNECT_DELAY * ws.reconnectAttempts);
+        } else {
+          this.cleanup(ws);
+        }
       });
     });
 
@@ -281,16 +325,21 @@ class ProgressTracker extends EventEmitter {
 
   private sendInitialState(ws: WebSocketWithId) {
     try {
-      this.progressMap.forEach((progress) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'progress',
-            ...progress
-          }));
-        }
-      });
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }));
+        
+        this.progressMap.forEach((progress) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: 'progress',
+              ...progress
+            }));
+          }
+        });
+      }
     } catch (error) {
       console.error('Error sending initial state:', error);
+      this.cleanup(ws);
     }
   }
 
@@ -298,22 +347,28 @@ class ProgressTracker extends EventEmitter {
     try {
       const message = JSON.parse(data.toString());
       
-      if (message.type === 'ping') {
-        ws.send(JSON.stringify({ 
-          type: 'pong',
-          timestamp: Date.now()
-        }));
-        this.handleHeartbeat(ws);
-      }
-
-      if (message.type === 'init' && message.videoId) {
-        const progress = this.progressMap.get(message.videoId);
-        if (progress && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'progress',
-            ...progress
-          }));
-        }
+      switch (message.type) {
+        case 'ping':
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+              type: 'pong',
+              timestamp: Date.now()
+            }));
+            this.handleHeartbeat(ws);
+          }
+          break;
+          
+        case 'init':
+          if (message.videoId) {
+            const progress = this.progressMap.get(message.videoId);
+            if (progress && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'progress',
+                ...progress
+              }));
+            }
+          }
+          break;
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
