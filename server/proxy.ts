@@ -10,10 +10,11 @@ export const setupProxy = (app: Express) => {
     changeOrigin: true,
     secure: false,
     xfwd: true,
-    proxyTimeout: 60000,
-    timeout: 60000,
+    proxyTimeout: 120000, // Increased timeout
+    timeout: 120000, // Increased timeout
     headers: {
-      'Connection': 'keep-alive'
+      'Connection': 'keep-alive',
+      'Keep-Alive': 'timeout=120' // Match the timeout settings
     },
     onProxyReq: (proxyReq: any, req: IncomingMessage) => {
       // Copy cookies to proxy request
@@ -21,25 +22,31 @@ export const setupProxy = (app: Express) => {
         proxyReq.setHeader('Cookie', req.headers.cookie);
       }
 
-      // Handle WebSocket upgrade
+      // Handle WebSocket upgrade with improved headers
       if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
         proxyReq.setHeader('Connection', 'Upgrade');
         proxyReq.setHeader('Upgrade', 'websocket');
+        proxyReq.setHeader('Sec-WebSocket-Version', '13');
+        if (req.headers['sec-websocket-key']) {
+          proxyReq.setHeader('Sec-WebSocket-Key', req.headers['sec-websocket-key']);
+        }
       }
     },
     onProxyRes: (proxyRes: any, req: IncomingMessage, res: ServerResponse) => {
-      // Add CORS headers for development
+      // Add CORS headers with improved settings
       const origin = req.headers.origin;
       if (origin) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie, Sec-WebSocket-Key, Sec-WebSocket-Version');
+        res.setHeader('Access-Control-Max-Age', '86400');
       }
 
-      // Handle WebSocket upgrade
+      // Handle WebSocket upgrade response
       if (proxyRes.headers.upgrade && proxyRes.headers.upgrade.toLowerCase() === 'websocket') {
         proxyRes.headers.connection = 'Upgrade';
+        proxyRes.headers['sec-websocket-accept'] = proxyRes.headers['sec-websocket-accept'];
       }
 
       // Copy cookies from proxy response
@@ -47,11 +54,18 @@ export const setupProxy = (app: Express) => {
       if (cookies) {
         res.setHeader('Set-Cookie', cookies);
       }
+
+      // Set keep-alive headers
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('Keep-Alive', 'timeout=120');
     },
     onError: (err: Error, req: IncomingMessage, res: ServerResponse) => {
       console.error('Proxy error:', err);
       if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.writeHead(502, { 
+          'Content-Type': 'application/json',
+          'Connection': 'keep-alive'
+        });
         res.end(JSON.stringify({ 
           error: 'Proxy error occurred',
           details: process.env.NODE_ENV === 'development' ? err.message : undefined
@@ -71,7 +85,7 @@ export const setupProxy = (app: Express) => {
     '/node_modules'
   ], viteProxy);
 
-  // Handle WebSocket upgrade events
+  // Handle WebSocket upgrade events with improved error handling
   app.on('upgrade', async (req: any, socket: any, head: any) => {
     try {
       if (req.url?.startsWith('/progress')) {
@@ -83,11 +97,18 @@ export const setupProxy = (app: Express) => {
           return;
         }
 
+        // Set socket timeout
+        socket.setTimeout(120000);
+        socket.setKeepAlive(true, 60000);
+
         // After authentication, handle the upgrade
         viteProxy.upgrade(req, socket, head);
       }
       
       if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
+        // Set socket timeout for HMR connections
+        socket.setTimeout(120000);
+        socket.setKeepAlive(true, 60000);
         viteProxy.upgrade(req, socket, head);
       }
     } catch (error) {

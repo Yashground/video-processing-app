@@ -303,25 +303,29 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const { toast } = useToast();
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const maxRetries = 5;
+  const reconnectDelay = 2000; // Increased base delay
 
   const handleWebSocketError = useCallback((error: Error) => {
     console.error('WebSocket error:', error);
     setWsError(error);
     toast({
       title: "Connection Error",
-      description: error.message,
+      description: "Attempting to reconnect...",
       variant: "destructive",
     });
   }, [toast]);
 
-  // WebSocket Configuration
+  // WebSocket Configuration with improved settings
   const WS_CONFIG = {
-    connectionTimeout: 10000,
+    connectionTimeout: 15000, // Increased timeout
     maxRetries: maxRetries,
-    minReconnectionDelay: 1000,
-    maxReconnectionDelay: 10000,
-    reconnectionDelayGrowFactor: 1.3,
-    heartbeatInterval: 15000,
+    minReconnectionDelay: reconnectDelay,
+    maxReconnectionDelay: 30000, // Increased max delay
+    reconnectionDelayGrowFactor: 1.5,
+    heartbeatInterval: 30000, // Increased heartbeat interval
+    debug: process.env.NODE_ENV === 'development',
+    timeoutInterval: 10000,
+    maxEnqueuedMessages: 100,
   };
 
   const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
@@ -331,32 +335,36 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     if (!wsRef.current || retryCount >= maxRetries) return;
     
     setWsRetrying(true);
-    const delay = Math.min(1000 * Math.pow(1.5, retryCount), WS_CONFIG.maxReconnectionDelay);
+    const delay = Math.min(reconnectDelay * Math.pow(2, retryCount), WS_CONFIG.maxReconnectionDelay);
+    
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+    }
     
     reconnectTimeoutRef.current = setTimeout(() => {
       if (wsRef.current) {
+        console.log(`Attempting reconnection ${retryCount + 1}/${maxRetries}`);
         wsRef.current.reconnect();
         setRetryCount(prev => prev + 1);
       }
     }, delay);
-  }, [retryCount, maxRetries]);
+  }, [retryCount, maxRetries, reconnectDelay]);
 
   const connectWebSocket = useCallback(() => {
     if (!videoId || !isAuthenticated || wsRef.current) return;
+
+    // Close existing connection if any
+    if (wsRef.current) {
+      wsRef.current.close(1000, "Reconnecting");
+      wsRef.current = null;
+    }
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/progress`;
     
     console.log('Connecting to WebSocket:', wsUrl);
     
-    const ws = new ReconnectingWebSocket(wsUrl, [], {
-      connectionTimeout: WS_CONFIG.connectionTimeout,
-      maxRetries: WS_CONFIG.maxRetries,
-      minReconnectionDelay: WS_CONFIG.minReconnectionDelay,
-      maxReconnectionDelay: WS_CONFIG.maxReconnectionDelay,
-      reconnectionDelayGrowFactor: WS_CONFIG.reconnectionDelayGrowFactor,
-    });
-
+    const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
     wsRef.current = ws;
 
     ws.addEventListener('open', () => {
@@ -373,21 +381,22 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           timestamp: Date.now()
         }));
 
-        const heartbeatInterval = setInterval(() => {
+        // Set up periodic ping
+        const pingInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             try {
               ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
             } catch (err) {
-              console.error('Heartbeat error:', err);
-              clearInterval(heartbeatInterval);
+              console.error('Ping error:', err);
+              clearInterval(pingInterval);
               handleReconnect();
             }
           } else {
-            clearInterval(heartbeatInterval);
+            clearInterval(pingInterval);
           }
         }, WS_CONFIG.heartbeatInterval);
 
-        ws.heartbeatInterval = heartbeatInterval;
+        ws.pingInterval = pingInterval;
       } catch (err) {
         handleWebSocketError(err instanceof Error ? err : new Error('Failed to initialize WebSocket'));
       }
@@ -424,57 +433,48 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         }
       } catch (err) {
         console.error('Error handling WebSocket message:', err);
-        handleWebSocketError(err instanceof Error ? err : new Error('Failed to process WebSocket message'));
       }
     });
 
     ws.addEventListener('close', (event) => {
       console.log('WebSocket connection closed:', event.code, event.reason);
       setWsConnected(false);
-      clearInterval(ws.heartbeatInterval);
+      clearInterval(ws.pingInterval);
       
       if (event.code === 1000) {
         console.log('WebSocket closed normally');
         return;
       }
 
-      if (event.code === 1006 || event.code === 1015) {
-        setWsRetrying(true);
-        if (retryCount < maxRetries) {
-          console.log(`Retrying connection in ${Math.pow(1.5, retryCount)}s (attempt ${retryCount + 1}/${maxRetries})`);
-          handleReconnect();
-        } else {
-          console.error('Max retry attempts reached');
-          handleWebSocketError(new Error('Unable to establish connection after multiple attempts'));
-        }
+      if (!ws.pingInterval) {
+        handleReconnect();
       }
     });
 
     ws.addEventListener('error', (event) => {
-      const errorMessage = event instanceof Error ? event.message : 'Connection error occurred';
       console.error('WebSocket error:', event);
-      
-      if (errorMessage.includes('401') || errorMessage.includes('Authentication failed')) {
+      setWsConnected(false);
+
+      if (event instanceof Error && event.message.includes('401')) {
         mutateUser().then(() => {
           if (retryCount < maxRetries) {
             handleReconnect();
           }
         });
       } else {
-        handleWebSocketError(new Error(errorMessage));
+        handleReconnect();
       }
-      
-      setWsConnected(false);
     });
 
     return () => {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
-      if (ws.heartbeatInterval) {
-        clearInterval(ws.heartbeatInterval);
+      if (ws.pingInterval) {
+        clearInterval(ws.pingInterval);
       }
       ws.close(1000, "Cleanup");
+      wsRef.current = null;
     };
   }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser, handleWebSocketError]);
 
@@ -482,11 +482,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     if (videoId && isAuthenticated) {
       const cleanup = connectWebSocket();
       return () => {
-        cleanup?.();
-        if (wsRef.current) {
-          wsRef.current.close(1000, "Normal closure");
-          wsRef.current = null;
-        }
+        if (cleanup) cleanup();
       };
     }
   }, [videoId, isAuthenticated, connectWebSocket]);
