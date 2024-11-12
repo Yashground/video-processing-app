@@ -12,6 +12,7 @@ import { OpenAI } from "openai";
 import { VideoCache } from "./lib/cache";
 import { AppError, handleError, withErrorHandler, retryOperation } from "./lib/error";
 import { constants } from "fs";
+import { processingQueue } from './lib/queue';
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -285,15 +286,21 @@ export function registerRoutes(app: Express) {
     }
 
     try {
-      // Ensure user is authenticated
-      if (!req.user?.id) {
-        throw new AppError(401, "Authentication required");
+      // Check if video is already being processed
+      if (processingQueue.isProcessing(videoId) || processingQueue.isQueued(videoId)) {
+        return res.status(409).json({
+          message: 'Video is already being processed',
+          queuePosition: processingQueue.getQueuePosition(videoId)
+        });
       }
 
       // Get video metadata before processing
       const metadata = await getVideoMetadata(videoId);
 
-      // Process audio and generate subtitles
+      // Add to processing queue
+      await processingQueue.enqueue(videoId, req.user!.id);
+
+      // Process video only when it reaches the front of the queue
       audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
       const subtitleData = await transcribeAudio(audioPath);
       
@@ -317,7 +324,6 @@ export function registerRoutes(app: Express) {
     } finally {
       if (audioPath) {
         try {
-          // Check if file exists before attempting to delete
           await access(audioPath, constants.F_OK);
           await unlink(audioPath);
         } catch (error) {
@@ -359,5 +365,22 @@ export function registerRoutes(app: Express) {
     });
 
     res.json({ translatedText });
+  }));
+
+  // Get queue status
+  app.get("/api/queue/status", requireAuth, withErrorHandler(async (req, res) => {
+    const status = processingQueue.getQueueStatus();
+    res.json(status);
+  }));
+
+  // Remove from queue (useful for cancellation)
+  app.delete("/api/queue/:videoId", requireAuth, withErrorHandler(async (req, res) => {
+    const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
+    const removed = processingQueue.removeFromQueue(videoId);
+    if (removed) {
+      res.json({ message: 'Removed from queue successfully' });
+    } else {
+      res.status(404).json({ message: 'Video not found in queue' });
+    }
   }));
 }
