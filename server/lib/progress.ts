@@ -49,37 +49,63 @@ class ProgressTracker extends EventEmitter {
       return;
     }
 
+    // Create WebSocket server with explicit configuration
     this.wss = new WebSocketServer({
-      server,
-      path: '/api/ws/progress',
-      verifyClient: async (info, callback) => {
-        try {
-          console.log('Verifying WebSocket client connection');
-          const authResult = await authenticate(info.req);
-          
-          if (!authResult) {
-            console.error('WebSocket authentication failed');
-            callback(false, 401, 'Unauthorized');
-            return;
-          }
+      noServer: true,
+      clientTracking: true,
+      perMessageDeflate: {
+        zlibDeflateOptions: {
+          chunkSize: 1024,
+          memLevel: 7,
+          level: 3
+        },
+        zlibInflateOptions: {
+          chunkSize: 10 * 1024
+        },
+        clientNoContextTakeover: true,
+        serverNoContextTakeover: true,
+        serverMaxWindowBits: 10,
+        concurrencyLimit: 10,
+        threshold: 1024
+      }
+    });
 
-          // Store authenticated user info in the request object
-          Object.assign(info.req, {
-            user: authResult.user,
-            session: authResult.session
-          });
+    // Handle upgrade requests
+    server.on('upgrade', async (request, socket, head) => {
+      if (!request.url?.startsWith('/api/ws/progress')) {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
+      }
 
-          callback(true);
-        } catch (error) {
-          console.error('WebSocket authentication error:', error);
-          callback(false, 500, 'Internal Server Error');
+      try {
+        const authResult = await authenticate(request);
+        if (!authResult) {
+          console.error('WebSocket authentication failed');
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
         }
+
+        // Store authenticated user info in the request object
+        Object.assign(request, {
+          user: authResult.user,
+          session: authResult.session
+        });
+
+        this.wss!.handleUpgrade(request, socket, head, (ws) => {
+          this.wss!.emit('connection', ws, authResult);
+        });
+      } catch (error) {
+        console.error('WebSocket upgrade error:', error);
+        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+        socket.destroy();
       }
     });
 
     this.wss.on('connection', (ws: WebSocket, req: AuthenticatedRequest) => {
       const userId = req.user?.id;
-      console.log('New WebSocket connection established for user:', userId);
+      console.log('[WebSocket] New connection established for user:', userId);
 
       // Set up heartbeat handling
       this.handleHeartbeat(ws);
@@ -93,7 +119,7 @@ class ProgressTracker extends EventEmitter {
               ...progress
             }));
           } catch (error) {
-            console.error('Error sending initial progress:', error);
+            console.error('[WebSocket] Error sending initial progress:', error);
           }
         }
       });
@@ -102,9 +128,13 @@ class ProgressTracker extends EventEmitter {
       ws.on('message', (data) => {
         try {
           const message = JSON.parse(data.toString());
-          
+
           if (message.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+            ws.send(JSON.stringify({
+              type: 'pong',
+              timestamp: Date.now(),
+              userId
+            }));
             this.handleHeartbeat(ws);
           }
 
@@ -118,7 +148,7 @@ class ProgressTracker extends EventEmitter {
             }
           }
         } catch (error) {
-          console.error('Error handling WebSocket message:', error);
+          console.error('[WebSocket] Error handling message:', error);
         }
       });
 
@@ -128,7 +158,7 @@ class ProgressTracker extends EventEmitter {
           try {
             ws.ping();
           } catch (error) {
-            console.error('Error sending ping:', error);
+            console.error('[WebSocket] Error sending ping:', error);
             clearInterval(heartbeatInterval);
             this.cleanup(ws);
           }
@@ -139,15 +169,15 @@ class ProgressTracker extends EventEmitter {
       }, this.HEARTBEAT_INTERVAL);
 
       // Handle connection close
-      ws.on('close', (code, reason) => {
-        console.log(`WebSocket connection closed for user ${userId}:`, code, reason);
+      ws.on('close', () => {
+        console.log(`[WebSocket] Connection closed for user ${userId}`);
         clearInterval(heartbeatInterval);
         this.cleanup(ws);
       });
 
       // Handle errors
       ws.on('error', (error) => {
-        console.error(`WebSocket error for user ${userId}:`, error);
+        console.error(`[WebSocket] Error for user ${userId}:`, error);
         clearInterval(heartbeatInterval);
         this.cleanup(ws);
       });
@@ -155,7 +185,7 @@ class ProgressTracker extends EventEmitter {
 
     // Handle server errors
     this.wss.on('error', (error) => {
-      console.error('WebSocket server error:', error);
+      console.error('[WebSocket] Server error:', error);
     });
 
     // Handle progress updates

@@ -7,6 +7,7 @@ import { Loader2, AlertCircle, Globe, RefreshCw, Wifi, WifiOff, Clock } from "lu
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import type { ImportMetaEnv } from '../types/vite-env';
 
 interface Subtitle {
   start: number;
@@ -395,6 +396,24 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
     });
   };
 
+  // Update the import.meta.env type declaration
+  // declare module "vite/client" {
+  //   interface ImportMetaEnv {
+  //     DEV: boolean;
+  //     PROD: boolean;
+  //     MODE: string;
+  //   }
+  // }
+
+  // Update the getWebSocketUrl function
+  const getWebSocketUrl = () => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.hostname;
+    const defaultPort = '5000';
+    const port = import.meta.env?.DEV ? `:${defaultPort}` : (window.location.port ? `:${window.location.port}` : '');
+    return `${protocol}//${host}${port}/api/ws/progress`;
+  };
+
   const connectWebSocket = () => {
     if (!videoId) return Promise.reject(new Error('No video ID provided'));
     if (!isAuthenticated) return Promise.reject(new Error('Authentication required'));
@@ -404,25 +423,23 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         cleanupWebSocket();
         setWsRetrying(true);
 
-        // Use absolute path for WebSocket URL
-        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/progress`;
+        const wsUrl = getWebSocketUrl();
+        console.log('[WebSocket] Connecting to:', wsUrl);
         
-        console.log('Connecting to WebSocket:', wsUrl);
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         // Set connection timeout
         const connectionTimeout = setTimeout(() => {
           if (ws.readyState !== WebSocket.OPEN) {
-            console.error('WebSocket connection timeout');
+            console.error('[WebSocket] Connection timeout');
             ws.close();
             reject(new Error('Connection timeout'));
           }
         }, 15000);
 
         ws.addEventListener('open', () => {
-          console.log('WebSocket connection established');
+          console.log('[WebSocket] Connection established');
           clearTimeout(connectionTimeout);
           setWsConnected(true);
           setWsRetrying(false);
@@ -443,9 +460,12 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
                   timestamp: Date.now()
                 }));
               } catch (error) {
-                console.error('Error sending heartbeat:', error);
+                console.error('[WebSocket] Error sending heartbeat:', error);
                 handleWebSocketError(error as Error);
               }
+            } else {
+              clearInterval(pingIntervalRef.current);
+              handleWebSocketError(new Error('Connection lost'));
             }
           }, 10000);
 
@@ -458,7 +478,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             }));
             resolve();
           } catch (error) {
-            console.error('Error sending init message:', error);
+            console.error('[WebSocket] Error sending init message:', error);
             reject(error);
           }
         });
@@ -477,66 +497,58 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
               return;
             }
 
-            if (data.type === 'progress' && data.videoId === videoId) {
+            if (data.type === 'progress') {
               if (data.error) {
                 handleWebSocketError(new Error(data.error));
                 return;
               }
-              setProgress(data.progress);
+              setProgress(data.progress || 0);
               setProgressMessage(data.message || '');
               setProgressStage(data.stage || '');
               setProgressSubstage(data.substage || '');
             }
+
+            // Handle pong messages
+            if (data.type === 'pong') {
+              console.log('[WebSocket] Received pong');
+            }
           } catch (error) {
-            console.error('Error parsing WebSocket message:', error);
+            console.error('[WebSocket] Error parsing message:', error);
           }
         });
 
         ws.addEventListener('close', (event) => {
-          console.log('WebSocket connection closed:', event.code, event.reason);
+          console.log(`[WebSocket] Connection closed: ${event.code} - ${event.reason}`);
           clearTimeout(connectionTimeout);
-          
-          // Clean up existing intervals
-          if (pingIntervalRef.current) {
-            clearInterval(pingIntervalRef.current);
-          }
-          
           setWsConnected(false);
           
-          // Handle abnormal closure with exponential backoff
-          if (event.code === 1006 || event.code === 1001) {
+          if (!event.wasClean) {
             const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 30000);
             if (retryCount < maxRetries) {
-              console.log(`Retrying connection in ${backoffDelay}ms (attempt ${retryCount + 1}/${maxRetries})`);
+              console.log(`[WebSocket] Retrying in ${backoffDelay}ms (attempt ${retryCount + 1}/${maxRetries})`);
               setWsRetrying(true);
               setRetryCount(prev => prev + 1);
-              
-              if (retryTimeoutRef.current) {
-                clearTimeout(retryTimeoutRef.current);
-              }
-              
               retryTimeoutRef.current = setTimeout(() => {
-                connectWebSocket().catch((error) => {
-                  console.error('Retry failed:', error);
-                  handleWebSocketError(error);
+                connectWebSocket().catch(error => {
+                  console.error('[WebSocket] Retry failed:', error);
                 });
               }, backoffDelay);
             } else {
-              setWsError(new Error('Maximum retry attempts reached'));
               setWsRetrying(false);
+              handleWebSocketError(new Error('Max retry attempts reached'));
             }
           }
         });
 
         ws.addEventListener('error', (error) => {
-          console.error('WebSocket error:', error);
+          console.error('[WebSocket] Error:', error);
           clearTimeout(connectionTimeout);
           handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection failed'));
           reject(error);
         });
 
       } catch (error) {
-        console.error('Error setting up WebSocket:', error);
+        console.error('[WebSocket] Setup error:', error);
         reject(error);
       }
     });
