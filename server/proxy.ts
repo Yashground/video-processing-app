@@ -1,10 +1,6 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import type { Express } from 'express';
-import type { IncomingMessage } from 'http';
-import type { Socket } from 'net';
-import type { Request } from 'express';
-import { authenticateWs } from './auth';
-import type { Server } from 'http';
+import type { IncomingMessage, ServerResponse } from 'http';
 
 export const setupProxy = (app: Express) => {
   const viteProxy = createProxyMiddleware({
@@ -13,15 +9,57 @@ export const setupProxy = (app: Express) => {
     changeOrigin: true,
     secure: false,
     xfwd: true,
-    proxyTimeout: 120000,
-    timeout: 120000,
+    proxyTimeout: 60000,
+    timeout: 60000,
     headers: {
-      'Connection': 'keep-alive',
-      'Keep-Alive': 'timeout=120'
+      'Connection': 'keep-alive'
+    },
+    onProxyReq: (proxyReq: any, req: IncomingMessage) => {
+      // Copy cookies to proxy request
+      if (req.headers.cookie) {
+        proxyReq.setHeader('Cookie', req.headers.cookie);
+      }
+
+      // Handle WebSocket upgrade
+      if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
+        proxyReq.setHeader('Connection', 'Upgrade');
+        proxyReq.setHeader('Upgrade', 'websocket');
+      }
+    },
+    onProxyRes: (proxyRes: any, req: IncomingMessage, res: ServerResponse) => {
+      // Add CORS headers for development
+      const origin = req.headers.origin;
+      if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
+      }
+
+      // Handle WebSocket upgrade
+      if (proxyRes.headers.upgrade && proxyRes.headers.upgrade.toLowerCase() === 'websocket') {
+        proxyRes.headers.connection = 'Upgrade';
+      }
+
+      // Copy cookies from proxy response
+      const cookies = proxyRes.headers['set-cookie'];
+      if (cookies) {
+        res.setHeader('Set-Cookie', cookies);
+      }
+    },
+    onError: (err: Error, req: IncomingMessage, res: ServerResponse) => {
+      console.error('Proxy error:', err);
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          error: 'Proxy error occurred',
+          details: process.env.NODE_ENV === 'development' ? err.message : undefined
+        }));
+      }
     }
   });
 
-  // Mount proxy middleware for Vite development routes
+  // Mount proxy middleware for development paths
   app.use([
     '/@vite',
     '/@fs',
@@ -29,88 +67,14 @@ export const setupProxy = (app: Express) => {
     '/src',
     '/__vite_hmr',
     '/.vite',
-    '/node_modules'
+    '/node_modules',
+    '/progress'  // Add progress WebSocket path
   ], viteProxy);
 
-  const server = app.get('server') as Server;
-
-  // WebSocket upgrade handler with improved error handling
-  const handleUpgrade = async (req: IncomingMessage, socket: Socket, head: Buffer) => {
-    try {
-      // Handle progress WebSocket endpoint
-      if (req.url?.startsWith('/api/ws/progress')) {
-        const cookieHeader = req.headers.cookie;
-        if (!cookieHeader) {
-          console.error('[WebSocket Upgrade] No cookie header');
-          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-          socket.destroy();
-          return;
-        }
-
-        // Set essential headers for WebSocket upgrade
-        const headers = {
-          ...req.headers,
-          'Cookie': cookieHeader,
-          'Connection': 'Upgrade',
-          'Upgrade': 'websocket',
-          'Sec-WebSocket-Key': req.headers['sec-websocket-key'],
-          'Sec-WebSocket-Version': req.headers['sec-websocket-version'],
-          'Sec-WebSocket-Protocol': req.headers['sec-websocket-protocol']
-        };
-
-        // Apply headers before authentication
-        Object.assign(req.headers, headers);
-
-        // Authenticate WebSocket connection
-        const authResult = await authenticateWs(req as unknown as Request);
-        if (!authResult) {
-          console.error('[WebSocket Auth] Authentication failed');
-          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-          socket.destroy();
-          return;
-        }
-
-        // Enhanced socket configuration
-        socket.setNoDelay(true);
-        socket.setTimeout(120000);
-        socket.setKeepAlive(true, 60000);
-
-        // Improved error handling for socket events
-        socket.on('error', (err) => {
-          console.error('[WebSocket Socket Error]:', err);
-          socket.destroy();
-        });
-
-        socket.on('timeout', () => {
-          console.error('[WebSocket Socket Timeout]');
-          socket.destroy();
-        });
-
-        // Forward the upgrade request to WebSocket server
-        try {
-          viteProxy.upgrade(req, socket, head);
-        } catch (upgradeError) {
-          console.error('[WebSocket Upgrade Error]:', upgradeError);
-          socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
-          socket.destroy();
-        }
-      }
-      // Handle Vite HMR WebSocket endpoint
-      else if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite')) {
-        viteProxy.upgrade(req, socket, head);
-      }
-      else {
-        console.error('[WebSocket Upgrade] Unknown endpoint:', req.url);
-        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
-        socket.destroy();
-      }
-    } catch (error) {
-      console.error('[WebSocket Upgrade Error]:', error);
-      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
-      socket.destroy();
+  // Handle WebSocket upgrade events
+  app.on('upgrade', (req: any, socket: any, head: any) => {
+    if (req.url?.startsWith('/__vite_hmr') || req.url?.startsWith('/@vite') || req.url?.startsWith('/progress')) {
+      viteProxy.upgrade(req, socket, head);
     }
-  };
-
-  server.on('upgrade', handleUpgrade);
-  return viteProxy;
+  });
 };

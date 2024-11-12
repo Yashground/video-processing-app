@@ -1,5 +1,4 @@
-import { useEffect, useState, useRef, Component, ErrorInfo, useCallback } from "react";
-import ReconnectingWebSocket from 'reconnecting-websocket';
+import { useEffect, useState, useRef, Component, ErrorInfo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import useSWR, { mutate } from "swr";
@@ -174,120 +173,6 @@ function TimeSavingEstimate({ wordCount, duration }: { wordCount: number; durati
   );
 }
 
-// Add new grouping utilities
-function groupSentencesByContext(subtitles: Subtitle[]): Subtitle[][] {
-  const groups: Subtitle[][] = [];
-  let currentGroup: Subtitle[] = [];
-  let lastEndTime = 0;
-
-  // Helper function to detect topic changes
-  function detectTopicChange(text1: string, text2: string): boolean {
-    const getKeywords = (text: string): Set<string> => {
-      const stopWords = new Set([
-        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-        'about', 'as', 'into', 'like', 'through', 'after', 'over', 'between', 'out', 'against',
-        'during', 'without', 'before', 'under', 'around', 'among'
-      ]);
-      
-      return new Set(
-        text.toLowerCase()
-          .replace(/[.,!?;:]/g, '')
-          .split(/\s+/)
-          .filter(word => word.length > 3 && !stopWords.has(word))
-      );
-    };
-
-    const keywords1 = getKeywords(text1);
-    const keywords2 = getKeywords(text2);
-    
-    // Calculate Jaccard similarity coefficient
-    const intersection = new Set([...keywords1].filter(x => keywords2.has(x)));
-    const union = new Set([...keywords1, ...keywords2]);
-    
-    return intersection.size / union.size < 0.2; // Less than 20% similarity indicates topic change
-  }
-
-  // Helper function to detect semantic transitions
-  function detectSemanticTransition(text: string): boolean {
-    const transitionPhrases = [
-      'however', 'moreover', 'furthermore', 'in addition', 'consequently',
-      'therefore', 'thus', 'hence', 'as a result', 'in conclusion',
-      'finally', 'to summarize', 'in contrast', 'on the other hand',
-      'alternatively', 'meanwhile', 'subsequently', 'nevertheless',
-      'in fact', 'indeed', 'notably', 'specifically', 'particularly',
-      'for example', 'for instance', 'in other words', 'that is'
-    ];
-
-    const lowercaseText = text.toLowerCase();
-    return transitionPhrases.some(phrase => lowercaseText.startsWith(phrase));
-  }
-
-  for (let i = 0; i < subtitles.length; i++) {
-    const subtitle = subtitles[i];
-    const timeGap = subtitle.start - lastEndTime;
-    const currentText = subtitle.text.trim();
-    const previousText = currentGroup[currentGroup.length - 1]?.text || '';
-
-    // Factors that influence grouping decisions
-    const hasLongPause = timeGap > 2000; // 2 seconds pause
-    const isSemanticTransition = detectSemanticTransition(currentText);
-    const isTopicChange = previousText && detectTopicChange(previousText, currentText);
-    const isEndOfThought = previousText.endsWith('.') || previousText.endsWith('!') || previousText.endsWith('?');
-    const isOptimalGroupSize = currentGroup.length >= 3 && currentGroup.length <= 5;
-
-    const shouldStartNewGroup = 
-      currentGroup.length === 0 ||
-      hasLongPause ||
-      (isEndOfThought && (isSemanticTransition || isTopicChange)) ||
-      (isOptimalGroupSize && isEndOfThought);
-
-    if (shouldStartNewGroup && currentGroup.length > 0) {
-      groups.push([...currentGroup]);
-      currentGroup = [];
-    }
-
-    currentGroup.push(subtitle);
-    lastEndTime = subtitle.end;
-  }
-
-  // Don't forget the last group
-  if (currentGroup.length > 0) {
-    groups.push(currentGroup);
-  }
-
-  return groups;
-}
-
-function hasCommonWords(text1: string, text2: string): boolean {
-  const getSignificantWords = (text: string): Set<string> => {
-    const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
-    return new Set(
-      text.toLowerCase()
-        .split(/\s+/)
-        .filter(word => word.length > 3 && !stopWords.has(word))
-    );
-  };
-
-  const words1 = getSignificantWords(text1);
-  const words2 = getSignificantWords(text2);
-  
-  let commonCount = 0;
-  for (const word of words1) {
-    if (words2.has(word)) commonCount++;
-  }
-  
-  // Return true if at least 20% of significant words are common
-  return commonCount >= Math.min(words1.size, words2.size) * 0.2;
-}
-
-function cleanAndJoinText(subtitles: Subtitle[]): string {
-  return subtitles
-    .map(sub => sub.text.trim())
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewerProps) {
   const [retryCount, setRetryCount] = useState(0);
   const [progress, setProgress] = useState(0);
@@ -299,288 +184,389 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const [wsRetrying, setWsRetrying] = useState(false);
   const [wordCount, setWordCount] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
-  const wsRef = useRef<ReconnectingWebSocket | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const retryTimeoutRef = useRef<NodeJS.Timeout>();
+  const pingIntervalRef = useRef<NodeJS.Timeout>();
   const { toast } = useToast();
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const maxRetries = 5;
-  const reconnectDelay = 2000;
-
-  // Add SWR hook for subtitles data with proper error handling and fallback
-  const { data: subtitles = [], error: subtitlesError, isValidating } = useSWR<Subtitle[]>(
+  
+  const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
     videoId ? `/api/subtitles/${videoId}` : null,
     {
-      fallbackData: [],
-      revalidateOnFocus: false,
-      revalidateOnReconnect: false,
+      onSuccess: (data) => {
+        if (data && data.length > 0) {
+          // Calculate word count from all subtitles
+          const text = data.map(sub => sub.text.trim()).join(' ');
+          setWordCount(text.split(/\s+/).length);
+          
+          // Get video duration from the last subtitle's end time
+          const lastSubtitle = data[data.length - 1];
+          setVideoDuration(lastSubtitle.end / 1000); // Convert ms to seconds
+        }
+      },
+      onError: (err) => {
+        let errorMessage = "Failed to process audio.";
+        if (err.message?.includes("too large") || err.message?.includes("maxFilesize")) {
+          errorMessage = "Audio file is too large (max 100MB). Please try a shorter video.";
+        } else if (err.message?.includes("duration") || err.message?.includes("maximum limit")) {
+          errorMessage = "Video is too long. Maximum supported duration is 2 hours.";
+        } else if (err.message?.includes("unavailable") || err.message?.includes("private")) {
+          errorMessage = "Video is unavailable or private. Please try another video.";
+        }
+        
+        toast({
+          title: "Audio Processing Error",
+          description: errorMessage,
+          variant: "destructive"
+        });
+      },
+      shouldRetryOnError: false
     }
   );
 
-  const handleWebSocketError = useCallback((error: Error) => {
-    console.error('WebSocket error:', error);
-    setWsError(error);
-    toast({
-      title: "Connection Error",
-      description: "Attempting to reconnect...",
-      variant: "destructive",
-    });
-  }, [toast]);
-
-  // Updated WebSocket Configuration
-  const WS_CONFIG = {
-    connectionTimeout: 8000,
-    maxRetries: 5,
-    minReconnectionDelay: 1000,
-    maxReconnectionDelay: 30000,
-    reconnectionDelayGrowFactor: 1.5,
-    debug: process.env.NODE_ENV === 'development',
-    timeoutInterval: 5000,
-    maxEnqueuedMessages: 50,
-    startClosed: true,
-    WebSocket: window.WebSocket,
-    shouldReconnect: (closeEvent: CloseEvent) => {
-      return closeEvent.code !== 1000 && closeEvent.code !== 1001;
-    }
-  };
-
-  const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
-  const isAuthenticated = !!user && !authError;
-
-  const getWebSocketUrl = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    return `${protocol}//${host}/api/ws/progress`;
-  }, []);
-
-  // First define cleanup
-  const cleanup = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = undefined;
-    }
-
-    if (wsRef.current) {
-      try {
-        wsRef.current.close(1000, 'Normal closure');
-      } catch (error) {
-        console.error('[WebSocket] Error during cleanup:', error);
-      } finally {
-        wsRef.current = null;
-      }
-    }
-
-    setWsConnected(false);
-    setWsRetrying(false);
-  }, []);
-
-  // Then define handleReconnect
-  const handleReconnect = useCallback(() => {
-    setWsRetrying(true);
-    setRetryCount((prev) => prev + 1);
-    reconnectTimeoutRef.current = setTimeout(() => {
-      if (connectWebSocket) {
-        connectWebSocket();
-      }
-    }, reconnectDelay);
-  }, [reconnectDelay]);
-
-  // Finally define connectWebSocket
-  const connectWebSocket = useCallback(() => {
-    if (!videoId || !isAuthenticated || wsRef.current) return;
-
-    cleanup();
-    
-    const wsUrl = getWebSocketUrl();
-    console.log('[WebSocket] Connecting to:', wsUrl);
-  
-    try {
-      const ws = new ReconnectingWebSocket(wsUrl, [], WS_CONFIG);
-    
-      wsRef.current = ws;
-  
-      ws.addEventListener('open', () => {
-        console.log('[WebSocket] Connection established');
-        setWsConnected(true);
-        setWsRetrying(false);
-        setWsError(null);
-        setRetryCount(0);
-  
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'init',
-            videoId,
-            timestamp: Date.now()
-          }));
-        }
-      });
-  
-      ws.addEventListener('message', (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          if (data.type === 'error') {
-            handleWebSocketError(new Error(data.message || 'Unknown WebSocket error'));
-            return;
-          }
-
-          if (data.type === 'auth_error') {
-            console.log('[WebSocket] Authentication error, refreshing session');
-            mutateUser()
-              .then(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                  cleanup();
-                  setTimeout(connectWebSocket, 1000);
-                }
-              })
-              .catch((error) => {
-                console.error('[WebSocket] Failed to refresh authentication:', error);
-                cleanup();
-              });
-            return;
-          }
-  
-          if (data.type === 'progress') {
-            setProgress(data.progress);
-            setProgressMessage(data.message || '');
-            setProgressStage(data.stage);
-            setProgressSubstage(data.substage || '');
-          }
-        } catch (error) {
-          console.error('[WebSocket] Error parsing message:', error);
-        }
-      });
-  
-      ws.addEventListener('error', (error) => {
-        console.error('[WebSocket] Error:', error);
-        handleWebSocketError(error instanceof Error ? error : new Error('WebSocket connection error'));
-      });
-  
-      ws.addEventListener('close', (event) => {
-        console.log('[WebSocket] Closed:', event.code, event.reason);
-        setWsConnected(false);
-      
-        if (event.code !== 1000 && retryCount < WS_CONFIG.maxRetries) {
-          handleReconnect();
-        } else {
-          setWsRetrying(false);
-        }
-      });
-  
-    } catch (error) {
-      console.error('[WebSocket] Creation error:', error);
-      handleWebSocketError(error instanceof Error ? error : new Error('Failed to create WebSocket connection'));
-    }
-  }, [videoId, isAuthenticated, cleanup, getWebSocketUrl, handleWebSocketError, handleReconnect, mutateUser, retryCount, WS_CONFIG]);
-
-  // Enhanced error handling for WebSocket
   useEffect(() => {
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      console.error('Unhandled promise rejection:', event.reason);
-      if (event.reason?.message?.includes('WebSocket')) {
-        handleWebSocketError(new Error(event.reason.message));
-      }
-    };
-
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    return () => {
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-    };
-  }, [handleWebSocketError]);
-
-  // Updated initialization
-  useEffect(() => {
-    const initTimeout = setTimeout(() => {
-      if (isAuthenticated && videoId) {
-        connectWebSocket();
-      }
-    }, 1000);
-
-    return () => {
-      clearTimeout(initTimeout);
-      cleanup();
-    };
-  }, [connectWebSocket, cleanup, isAuthenticated, videoId]);
-
-  // Add useEffect for updating text when subtitles change
-  useEffect(() => {
-    if (subtitles?.length && onTextUpdate) {
-      const fullText = subtitles.map(s => s.text).join(' ');
+    if (subtitles && onTextUpdate) {
+      const fullText = subtitles
+        .map(sub => sub.text.trim())
+        .join(' ')
+        .replace(/\s+/g, ' ');
       onTextUpdate(fullText);
     }
   }, [subtitles, onTextUpdate]);
 
-  if (subtitlesError) {
-    return (
-      <Alert variant="destructive">
-        <AlertCircle className="h-5 w-5" />
-        <AlertTitle>Error</AlertTitle>
-        <AlertDescription>
-          Failed to load subtitles. Please try again later.
-        </AlertDescription>
-      </Alert>
-    );
-  }
+  const cleanupWebSocket = () => {
+    if (wsRef.current) {
+      wsRef.current.close(1000, "Cleanup");
+      wsRef.current = null;
+    }
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+    }
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+    }
+    setWsConnected(false);
+    setWsRetrying(false);
+  };
+
+  const handleWebSocketError = (error: Event | Error) => {
+    console.error('WebSocket error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Connection error occurred';
+    setWsError(new Error(errorMessage));
+    setWsConnected(false);
+  };
+
+  const connectWebSocket = () => {
+    if (!videoId) return Promise.reject(new Error('No video ID provided'));
+    
+    return new Promise<void>((resolve, reject) => {
+      try {
+        cleanupWebSocket();
+        setWsRetrying(true);
+
+        // Use port 5000 explicitly since that's where our server is running
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/progress`;
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        const connectionTimeout = setTimeout(() => {
+          if (ws.readyState !== WebSocket.OPEN) {
+            ws.close();
+            reject(new Error('Connection timeout'));
+          }
+        }, 5000);
+
+        ws.onopen = () => {
+          clearTimeout(connectionTimeout);
+          setWsConnected(true);
+          setWsRetrying(false);
+          setWsError(null);
+          
+          // Setup ping interval
+          pingIntervalRef.current = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send('ping');
+            }
+          }, 30000);
+          
+          // Send initial connection message with videoId
+          ws.send(JSON.stringify({ type: 'init', videoId }));
+          
+          resolve();
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const update: ProgressUpdate = JSON.parse(event.data);
+            if (update.videoId === videoId) {
+              if (update.error) {
+                setWsError(new Error(update.error));
+                toast({
+                  title: "Processing Error",
+                  description: update.error,
+                  variant: "destructive"
+                });
+              } else {
+                setProgress(update.progress);
+                setProgressMessage(update.message || "");
+                setProgressStage(update.stage);
+                setProgressSubstage(update.substage || "");
+                setWsError(null);
+              }
+            }
+          } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
+            handleWebSocketError(error);
+          }
+        };
+
+        ws.onerror = handleWebSocketError;
+
+        ws.onclose = (event) => {
+          clearTimeout(connectionTimeout);
+          console.log('WebSocket closed:', event.code, event.reason);
+          setWsConnected(false);
+          
+          // Only retry if closure wasn't intentional
+          if (event.code !== 1000 && retryCount < 3) {
+            const retryDelay = Math.min(1000 * Math.pow(2, retryCount), 5000);
+            setWsRetrying(true);
+            
+            retryTimeoutRef.current = setTimeout(() => {
+              setRetryCount(count => count + 1);
+              connectWebSocket().catch(reject);
+            }, retryDelay);
+          } else if (retryCount >= 3) {
+            setWsRetrying(false);
+            setWsError(new Error('Failed to maintain connection to the server'));
+            reject(new Error('Maximum retry attempts reached'));
+          }
+        };
+      } catch (error) {
+        console.error('Error establishing WebSocket connection:', error);
+        reject(error);
+      }
+    });
+  };
+
+  // WebSocket connection effect
+  useEffect(() => {
+    if (!videoId) return;
+
+    connectWebSocket().catch((error) => {
+      console.error('Failed to establish WebSocket connection:', error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to connect to the progress tracking server. Please try refreshing the page.",
+        variant: "destructive"
+      });
+    });
+
+    return cleanupWebSocket;
+  }, [videoId, retryCount]);
+
+  const handleRetry = () => {
+    setRetryCount(0);
+    setProgress(0);
+    setProgressMessage("");
+    setProgressStage("");
+    setProgressSubstage("");
+    setWsError(null);
+    mutate(videoId ? `/api/subtitles/${videoId}` : null);
+    
+    if (!wsConnected) {
+      connectWebSocket().catch(console.error);
+    }
+  };
+
+  const getLanguageName = (code?: string) => {
+    if (!code) return "Unknown";
+    return languageNames[code.toLowerCase()] || code;
+  };
+
+  const handleError = (error: Error) => {
+    console.error('SubtitleViewer error:', error);
+    toast({
+      title: "Error",
+      description: "An error occurred while displaying subtitles. Please try refreshing the page.",
+      variant: "destructive"
+    });
+  };
 
   if (!videoId) {
     return (
-      <div className="p-8 text-center text-muted-foreground">
-        Enter a YouTube URL to start processing
+      <div className="p-8 text-center text-muted-foreground text-lg animate-fade-in">
+        <p className="mb-4">✨ Transform YouTube videos into readable text</p>
+        <p className="text-sm text-muted-foreground">
+          Enter a YouTube URL above to extract audio, generate transcriptions, and save time by reading instead of watching
+        </p>
       </div>
     );
   }
 
-  const subtitleGroups = groupSentencesByContext(subtitles || []);
+  const textStyles = {
+    container: "p-8 space-y-8",
+    textContainer: `
+      prose 
+      prose-zinc 
+      dark:prose-invert 
+      max-w-none 
+      space-y-8
+      [&>*]:transition-all
+      [&>*]:duration-300
+    `,
+    paragraph: `
+      relative
+      group
+      mb-8
+      leading-[1.8]
+      tracking-wide
+      text-base
+      text-foreground/90
+      first-letter:text-xl
+      first-letter:font-medium
+      first-line:leading-[2]
+      indent-[1.5em]
+      hover:bg-primary/5
+      rounded-lg
+      p-8
+      transition-all
+      duration-300
+      border-l-2
+      border-transparent
+      hover:border-primary/20
+      hover:shadow-sm
+      hover:translate-x-1
+    `,
+    section: "rounded-lg bg-card/50 p-8 shadow-sm border border-border/10 backdrop-blur-sm hover:bg-card/60 transition-colors duration-300",
+    headingLarge: "text-2xl font-semibold mb-6 text-foreground/90 tracking-tight",
+    headingMedium: "text-xl font-medium mb-4 text-foreground/80",
+    sectionDivider: "my-8 border-t border-border/40 w-1/3 mx-auto opacity-50",
+    timestamp: `
+      absolute 
+      -left-2 
+      top-1/2 
+      -translate-y-1/2
+      px-2 
+      py-1 
+      text-xs 
+      font-mono 
+      text-muted-foreground/60
+      opacity-0
+      group-hover:opacity-100
+      transition-opacity
+      duration-300
+    `,
+    groupContainer: "space-y-6 relative",
+  };
+
+  const formatTimestamp = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+  };
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-semibold">Video Transcription</h2>
-        <ConnectionStatus 
-          connected={wsConnected} 
-          retrying={wsRetrying}
-          onRetry={connectWebSocket}
-        />
-      </div>
-
-      {progress > 0 && progress < 100 && (
-        <div className="space-y-4">
-          <Progress value={progress} />
-          <ProgressStages stage={progressStage} substage={progressSubstage} />
-        </div>
-      )}
-
-      {isValidating && !subtitles?.length ? (
-        <div className="flex items-center justify-center p-8">
-          <Loader2 className="h-8 w-8 animate-spin" />
-        </div>
-      ) : subtitles?.length > 0 ? (
-        <>
-          {wordCount > 0 && videoDuration > 0 && (
+    <ErrorBoundary onError={handleError}>
+      <div className="p-6 animate-fade-in">
+        <div className="mb-6 space-y-4">
+          <div className="flex items-center justify-between">
+            {subtitles?.[0]?.language && (
+              <div className="flex items-center gap-2">
+                <Globe className="h-5 w-5 text-primary" />
+                <Badge variant="secondary" className="bg-gradient-to-r from-primary/10 to-primary/5 text-primary px-3 py-1">
+                  {getLanguageName(subtitles[0].language)}
+                </Badge>
+              </div>
+            )}
+            <ConnectionStatus
+              connected={wsConnected}
+              retrying={wsRetrying}
+              onRetry={handleRetry}
+            />
+          </div>
+          
+          {subtitles && !error && !isValidating && (
             <TimeSavingEstimate wordCount={wordCount} duration={videoDuration} />
           )}
-          <ScrollArea className="h-[600px] rounded-md border p-4">
-            {subtitleGroups.map((group, groupIndex) => (
-              <div 
-                key={groupIndex} 
-                className="mb-6 p-4 rounded-lg bg-muted/50 hover:bg-muted/70 transition-colors"
-              >
-                {group.map((subtitle, index) => (
-                  <div key={index} className="mb-2">
-                    <div className="text-base leading-relaxed">
-                      {subtitle.text}
-                      {subtitle.language && (
-                        <Badge variant="outline" className="ml-2">
-                          <Globe className="h-3 w-3 mr-1" />
-                          {languageNames[subtitle.language] || subtitle.language}
-                        </Badge>
-                      )}
-                    </div>
+        </div>
+
+        {error || wsError ? (
+          <div className={textStyles.section}>
+            <Alert variant="destructive" className="mb-6 border-destructive/50 bg-destructive/10">
+              <AlertCircle className="h-5 w-5" />
+              <AlertTitle className={textStyles.headingMedium}>
+                {wsError ? "Connection Error" : "Audio Processing Failed"}
+              </AlertTitle>
+              <AlertDescription className="mt-2 text-base leading-7">
+                {wsError ? (
+                  <p>{wsError.message || "Failed to connect to the server"}</p>
+                ) : (
+                  <>
+                    We couldn't process the audio because:
+                    <ul className="list-disc list-inside mt-3 space-y-2">
+                      <li>The video might be too long (max 2 hours)</li>
+                      <li>The file might be too large (max 100MB)</li>
+                      <li>The video might be private or unavailable</li>
+                      <li>There might be an issue with the audio extraction</li>
+                    </ul>
+                  </>
+                )}
+              </AlertDescription>
+            </Alert>
+            <Button 
+              onClick={handleRetry} 
+              className="w-full h-11 text-base bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary transition-all duration-300"
+            >
+              <RefreshCw className="mr-2 h-5 w-5" />
+              Try {wsError ? "Reconnecting" : "Processing"} Again
+            </Button>
+          </div>
+        ) : (
+          <ScrollArea className="h-[500px] rounded-lg border bg-background/50 backdrop-blur-sm">
+            {isValidating ? (
+              <div className={textStyles.container}>
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 text-primary text-lg">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    <span>{progressMessage || "Processing audio..."}</span>
                   </div>
-                ))}
+                  <div className="relative">
+                    <Progress 
+                      value={progress} 
+                      className="h-2 bg-muted transition-all duration-300"
+                    />
+                  </div>
+                  <div className={textStyles.section}>
+                    <ProgressStages stage={progressStage} substage={progressSubstage} />
+                  </div>
+                </div>
               </div>
-            ))}
+            ) : subtitles && subtitles.length > 0 ? (
+              <div className={textStyles.container}>
+                <div className={textStyles.textContainer}>
+                  {subtitles.map((subtitle, index) => (
+                    <div key={subtitle.start} className={textStyles.paragraph}>
+                      <span className={textStyles.timestamp}>
+                        {formatTimestamp(subtitle.start)}
+                      </span>
+                      {subtitle.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="p-8 text-center text-muted-foreground">
+                <p className="text-lg mb-4">✨ Transform YouTube videos into readable text</p>
+                <p className="text-sm text-muted-foreground">
+                  Enter a YouTube URL above to extract audio and generate transcriptions
+                </p>
+              </div>
+            )}
           </ScrollArea>
-        </>
-      ) : null}
-    </div>
+        )}
+      </div>
+    </ErrorBoundary>
   );
 }

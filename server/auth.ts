@@ -1,15 +1,13 @@
 import passport from "passport";
 import { IVerifyOptions, Strategy as LocalStrategy } from "passport-local";
-import { Express, Request } from "express";
+import { type Express, Request } from "express";
 import session from "express-session";
 import createMemoryStore from "memorystore";
 import { scrypt, randomBytes, timingSafeEqual } from "crypto";
 import { promisify } from "util";
-import { users, insertUserSchema, type User } from "db/schema";
+import { users, insertUserSchema, type User as SelectUser } from "db/schema";
 import { db } from "db";
 import { eq } from "drizzle-orm";
-import cookie from "cookie";
-import { createHash } from 'crypto';
 
 const scryptAsync = promisify(scrypt);
 const crypto = {
@@ -32,157 +30,81 @@ const crypto = {
 
 declare global {
   namespace Express {
-    interface User extends Omit<User, 'password'> {}
+    interface User extends SelectUser {}
   }
 }
 
 export interface AuthenticatedRequest extends Request {
   user?: Express.User;
-  session: session.Session & {
-    passport?: {
-      user: number;
-    };
-  } & {
-    cookie: session.Cookie;
-  };
+  session: session.Session & { userId?: number };
 }
 
-const SECRET = process.env.REPL_ID || "watch-hour-secret";
-
-const sessionStore = new (createMemoryStore(session))({
-  checkPeriod: 86400000,
-  ttl: 24 * 60 * 60 * 1000,
-  stale: false
-});
-
-function verifySignature(cookieStr: string, secret: string): string | false {
+export const authenticateWs = async (request: any): Promise<AuthenticatedRequest | false> => {
   try {
-    const cookies = cookie.parse(cookieStr);
-    const sessionCookie = cookies['watch-hour-session'];
-    
-    if (!sessionCookie || !sessionCookie.startsWith('s:')) {
+    if (!request.headers.cookie) {
       return false;
     }
 
-    const signedCookie = sessionCookie.slice(2);
-    const [value, signature] = signedCookie.split('.');
-    
-    if (!value || !signature) {
-      return false;
-    }
+    const cookies = request.headers.cookie.split(';').reduce((acc: { [key: string]: string }, cookie: string) => {
+      const [key, value] = cookie.trim().split('=');
+      acc[key.trim()] = decodeURIComponent(value);
+      return acc;
+    }, {});
 
-    const expectedHash = createHash('sha256')
-      .update(value + secret)
-      .digest('base64')
-      .replace(/=+$/, '');
-
-    return timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHash)) ? value : false;
-  } catch (error) {
-    console.error('[Session Verify] Error:', error);
-    return false;
-  }
-}
-
-export const authenticateWs = async (request: Request): Promise<AuthenticatedRequest | false> => {
-  try {
-    const cookieHeader = request.headers.cookie;
-    if (!cookieHeader) {
-      console.error('[WebSocket Auth] No cookie header');
-      return false;
-    }
-
-    const sessionId = verifySignature(cookieHeader, SECRET);
+    const sessionId = cookies['watch-hour-session'];
     if (!sessionId) {
-      console.error('[WebSocket Auth] Invalid session signature');
       return false;
     }
 
-    return new Promise((resolve) => {
-      sessionStore.get(sessionId, async (err, session) => {
-        if (err) {
-          console.error('[WebSocket Auth] Session retrieval error:', err);
-          resolve(false);
-          return;
-        }
+    const store = new (createMemoryStore(session))({
+      checkPeriod: 86400000
+    });
 
-        if (!session?.passport?.user) {
-          console.error('[WebSocket Auth] No user in session');
-          resolve(false);
-          return;
-        }
-
-        try {
-          const [user] = await db
-            .select()
-            .from(users)
-            .where(eq(users.id, session.passport.user))
-            .limit(1);
-
-          if (!user) {
-            console.error('[WebSocket Auth] User not found in database');
-            resolve(false);
-            return;
-          }
-
-          // Ensure session is still valid
-          const now = Date.now();
-          if (session.cookie && session.cookie.expires) {
-            const expiresAt = new Date(session.cookie.expires).getTime();
-            if (now > expiresAt) {
-              console.error('[WebSocket Auth] Session expired');
-              resolve(false);
-              return;
-            }
-          }
-
-          // Update session expiry
-          session.cookie = session.cookie || {};
-          session.cookie.expires = new Date(now + (24 * 60 * 60 * 1000));
-
-          // Save updated session
-          sessionStore.set(sessionId, session, (err) => {
-            if (err) {
-              console.error('[WebSocket Auth] Session update error:', err);
-              resolve(false);
-              return;
-            }
-
-            // Remove sensitive data before attaching to request
-            const { password: _, ...userWithoutPassword } = user;
-            const authenticatedRequest = request as AuthenticatedRequest;
-            authenticatedRequest.user = userWithoutPassword;
-            authenticatedRequest.session = session as AuthenticatedRequest['session'];
-            
-            console.log('[WebSocket Auth] Authentication successful for user:', userWithoutPassword.username);
-            resolve(authenticatedRequest);
-          });
-        } catch (error) {
-          console.error('[WebSocket Auth] Database error:', error);
-          resolve(false);
-        }
+    const sessionData: any = await new Promise((resolve) => {
+      store.get(sessionId, (err, session) => {
+        resolve(session || null);
       });
     });
+
+    if (!sessionData || !sessionData.passport?.user) {
+      return false;
+    }
+
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, sessionData.passport.user))
+      .limit(1);
+
+    if (!user) {
+      return false;
+    }
+
+    return { ...request, user, session: { ...sessionData, userId: user.id } } as AuthenticatedRequest;
   } catch (error) {
-    console.error('[WebSocket Auth] Unexpected error:', error);
+    console.error('WebSocket authentication error:', error);
     return false;
   }
 };
 
 export function setupAuth(app: Express) {
+  const MemoryStore = createMemoryStore(session);
   const sessionSettings: session.SessionOptions = {
     secret: process.env.REPL_ID || "watch-hour-secret",
-    resave: false,
-    saveUninitialized: false,
+    resave: true,
+    saveUninitialized: true,
     name: 'watch-hour-session',
     cookie: {
-      maxAge: 24 * 60 * 60 * 1000,
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
       httpOnly: true,
       sameSite: 'lax',
-      secure: app.get("env") === "production",
-      path: '/'
+      path: '/',
+      secure: app.get("env") === "production"
     },
-    store: sessionStore,
-    rolling: true // Refresh session on each request
+    store: new MemoryStore({
+      checkPeriod: 86400000, // prune expired entries every 24h
+      ttl: 24 * 60 * 60 * 1000 // Match cookie maxAge
+    }),
   };
 
   if (app.get("env") === "production") {
@@ -238,46 +160,6 @@ export function setupAuth(app: Express) {
     }
   });
 
-  // Login route
-  app.post("/login", (req, res, next) => {
-    const result = insertUserSchema.safeParse(req.body);
-    if (!result.success) {
-      return res
-        .status(400)
-        .json({ message: "Invalid input", errors: result.error.flatten() });
-    }
-
-    passport.authenticate("local", (err: any, user: Express.User, info: IVerifyOptions) => {
-      if (err) {
-        console.error('Authentication error:', err);
-        return next(err);
-      }
-      if (!user) {
-        return res.status(400).json({
-          message: info.message ?? "Login failed",
-        });
-      }
-      
-      req.login(user, (err) => {
-        if (err) {
-          console.error('Login error:', err);
-          return next(err);
-        }
-        req.session.save((err) => {
-          if (err) {
-            console.error('Session save error:', err);
-            return next(err);
-          }
-          return res.json({
-            message: "Login successful",
-            user: { id: user.id, username: user.username },
-          });
-        });
-      });
-    })(req, res, next);
-  });
-
-  // Registration route
   app.post("/register", async (req, res, next) => {
     try {
       const result = insertUserSchema.safeParse(req.body);
@@ -331,7 +213,44 @@ export function setupAuth(app: Express) {
     }
   });
 
-  // Logout route
+  app.post("/login", (req, res, next) => {
+    const result = insertUserSchema.safeParse(req.body);
+    if (!result.success) {
+      return res
+        .status(400)
+        .json({ message: "Invalid input", errors: result.error.flatten() });
+    }
+
+    passport.authenticate("local", (err: any, user: Express.User, info: IVerifyOptions) => {
+      if (err) {
+        console.error('Authentication error:', err);
+        return next(err);
+      }
+      if (!user) {
+        return res.status(400).json({
+          message: info.message ?? "Login failed",
+        });
+      }
+      
+      req.login(user, (err) => {
+        if (err) {
+          console.error('Login error:', err);
+          return next(err);
+        }
+        req.session.save((err) => {
+          if (err) {
+            console.error('Session save error:', err);
+            return next(err);
+          }
+          return res.json({
+            message: "Login successful",
+            user: { id: user.id, username: user.username },
+          });
+        });
+      });
+    })(req, res, next);
+  });
+
   app.post("/logout", (req, res) => {
     if (!req.isAuthenticated()) {
       return res.status(400).json({ message: "Not logged in" });
@@ -353,7 +272,6 @@ export function setupAuth(app: Express) {
     });
   });
 
-  // User info route
   app.get("/api/user", (req, res) => {
     if (!req.session) {
       return res.status(401).json({ message: "No session found" });

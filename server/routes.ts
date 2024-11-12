@@ -4,15 +4,13 @@ import { db } from "../db";
 import { subtitles } from "../db/schema";
 import { eq, desc, sum } from "drizzle-orm";
 import { downloadAudio, transcribeAudio } from "./lib/audio";
-import { mkdir, unlink, access } from "fs/promises";
+import { mkdir, unlink } from "fs/promises";
 import { join } from "path";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { OpenAI } from "openai";
 import { VideoCache } from "./lib/cache";
 import { AppError, handleError, withErrorHandler, retryOperation } from "./lib/error";
-import { constants } from "fs";
-import { processingQueue } from './lib/queue';
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -286,53 +284,15 @@ export function registerRoutes(app: Express) {
     }
 
     try {
-      // Check if video is already being processed
-      if (processingQueue.isProcessing(videoId) || processingQueue.isQueued(videoId)) {
-        const queueStatus = processingQueue.getQueueStatus();
-        const position = processingQueue.getQueuePosition(videoId);
-        
-        return res.status(409).json({
-          message: 'Video is already being processed',
-          queuePosition: position,
-          queueStatus: {
-            ahead: position - 1,
-            processing: queueStatus.processing,
-            estimatedWaitTime: position * 2 // Rough estimate: 2 minutes per video
-          }
-        });
+      // Ensure user is authenticated
+      if (!req.user?.id) {
+        throw new AppError(401, "Authentication required");
       }
 
       // Get video metadata before processing
       const metadata = await getVideoMetadata(videoId);
 
-      // Add to processing queue with normal priority
-      await processingQueue.enqueue(videoId, req.user!.id, 1);
-
-      // Return accepted status with queue information
-      const queueStatus = processingQueue.getQueueStatus();
-      const position = processingQueue.getQueuePosition(videoId);
-      
-      return res.status(202).json({
-        message: 'Video added to processing queue',
-        queueStatus: {
-          position,
-          ahead: position - 1,
-          processing: queueStatus.processing,
-          estimatedWaitTime: position * 2 // Rough estimate: 2 minutes per video
-        }
-      });
-
-    } catch (error) {
-      console.error('Error processing video:', error);
-      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-      return res.status(500).json({
-        error: errorMessage,
-        message: 'Failed to process video'
-      });
-    }
-
-    try {
-      // Process video only when it reaches the front of the queue
+      // Process audio and generate subtitles
       audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
       const subtitleData = await transcribeAudio(audioPath);
       
@@ -348,21 +308,14 @@ export function registerRoutes(app: Express) {
         title: metadata.title,
         thumbnailUrl: metadata.thumbnailUrl,
         timeSaved: index === 0 ? timeSaved : 0,
-        userId: req.user!.id
+        userId: req.user!.id  // Add the user_id from the authenticated session
       }));
 
       await db.insert(subtitles).values(subtitlesWithMetadata);
       res.json(subtitlesWithMetadata);
     } finally {
       if (audioPath) {
-        try {
-          await access(audioPath, constants.F_OK);
-          await unlink(audioPath);
-        } catch (error) {
-          if (error.code !== 'ENOENT') {
-            console.error('Error cleaning up audio file:', error);
-          }
-        }
+        await unlink(audioPath).catch(console.error);
       }
     }
   }));
@@ -397,22 +350,5 @@ export function registerRoutes(app: Express) {
     });
 
     res.json({ translatedText });
-  }));
-
-  // Get queue status
-  app.get("/api/queue/status", requireAuth, withErrorHandler(async (req, res) => {
-    const status = processingQueue.getQueueStatus();
-    res.json(status);
-  }));
-
-  // Remove from queue (useful for cancellation)
-  app.delete("/api/queue/:videoId", requireAuth, withErrorHandler(async (req, res) => {
-    const { videoId } = await z.object({ videoId: videoIdSchema }).parseAsync(req.params);
-    const removed = processingQueue.removeFromQueue(videoId);
-    if (removed) {
-      res.json({ message: 'Removed from queue successfully' });
-    } else {
-      res.status(404).json({ message: 'Video not found in queue' });
-    }
   }));
 }
