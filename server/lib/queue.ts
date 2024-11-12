@@ -8,6 +8,8 @@ interface QueueItem {
   timestamp: number;
   retryCount: number;
   maxRetries: number;
+  state: 'pending' | 'processing' | 'failed' | 'completed';
+  error?: string;
 }
 
 export class ProcessingQueue extends EventEmitter {
@@ -17,10 +19,13 @@ export class ProcessingQueue extends EventEmitter {
   private readonly MAX_CONCURRENT = 3;
   private readonly MAX_QUEUE_SIZE = 100;
   private readonly MAX_RETRIES = 3;
+  private readonly CLEANUP_INTERVAL = 3600000; // 1 hour
+  private cleanupTimer: NodeJS.Timeout | null = null;
 
   private constructor() {
     super();
-    this.processQueue();
+    this.startQueueProcessor();
+    this.startCleanupTimer();
   }
 
   static getInstance(): ProcessingQueue {
@@ -28,6 +33,27 @@ export class ProcessingQueue extends EventEmitter {
       ProcessingQueue.instance = new ProcessingQueue();
     }
     return ProcessingQueue.instance;
+  }
+
+  private startCleanupTimer() {
+    this.cleanupTimer = setInterval(() => {
+      this.cleanupStaleItems();
+    }, this.CLEANUP_INTERVAL);
+  }
+
+  private cleanupStaleItems() {
+    const now = Date.now();
+    const TWO_HOURS = 7200000;
+
+    // Remove completed items older than 2 hours
+    this.queue = this.queue.filter(item => {
+      const isStale = item.state === 'completed' && (now - item.timestamp > TWO_HOURS);
+      if (isStale) {
+        console.log(`Cleaning up stale item: ${item.videoId}`);
+        this.emit('cleaned', item);
+      }
+      return !isStale;
+    });
   }
 
   async enqueue(videoId: string, userId: string, priority: number = 1): Promise<void> {
@@ -48,6 +74,7 @@ export class ProcessingQueue extends EventEmitter {
       timestamp: Date.now(),
       retryCount: 0,
       maxRetries: this.MAX_RETRIES,
+      state: 'pending'
     };
 
     this.queue.push(queueItem);
@@ -67,42 +94,75 @@ export class ProcessingQueue extends EventEmitter {
 
   private sortQueue(): void {
     this.queue.sort((a, b) => {
-      // Sort by priority first (higher priority first)
+      // Sort by state first (pending before others)
+      if (a.state === 'pending' && b.state !== 'pending') return -1;
+      if (a.state !== 'pending' && b.state === 'pending') return 1;
+
+      // Then by priority (higher priority first)
       if (b.priority !== a.priority) {
         return b.priority - a.priority;
       }
+
       // Then by timestamp (older first)
       return a.timestamp - b.timestamp;
     });
+
+    // Update queue positions for all pending items
+    this.queue
+      .filter(item => item.state === 'pending')
+      .forEach((item, index) => {
+        progressTracker.updateProgress(
+          item.videoId,
+          'initialization',
+          0,
+          'Waiting in queue',
+          `Position in queue: ${index + 1}`
+        );
+      });
   }
 
-  private async processQueue(): Promise<void> {
+  private startQueueProcessor(): void {
     setInterval(() => {
-      while (this.processing.size < this.MAX_CONCURRENT && this.queue.length > 0) {
-        const item = this.queue.shift();
-        if (item) {
-          this.processing.add(item.videoId);
-          this.processItem(item).catch((error) => {
-            console.error(`Error processing video ${item.videoId}:`, error);
-            if (item.retryCount < item.maxRetries) {
-              item.retryCount++;
-              this.queue.unshift(item);
-              progressTracker.updateProgress(
-                item.videoId,
-                'initialization',
-                0,
-                `Retrying (${item.retryCount}/${item.maxRetries})`,
-                'Waiting for retry'
-              );
-            } else {
-              progressTracker.reportError(item.videoId, 'Failed to process video after multiple attempts');
-            }
-          }).finally(() => {
-            this.processing.delete(item.videoId);
-          });
-        }
-      }
+      this.processNextItems();
     }, 1000); // Check queue every second
+  }
+
+  private async processNextItems(): Promise<void> {
+    const pendingItems = this.queue.filter(item => item.state === 'pending');
+    
+    while (this.processing.size < this.MAX_CONCURRENT && pendingItems.length > 0) {
+      const item = pendingItems.shift();
+      if (item) {
+        item.state = 'processing';
+        this.processing.add(item.videoId);
+        
+        this.processItem(item).catch((error) => {
+          console.error(`Error processing video ${item.videoId}:`, error);
+          item.error = error.message;
+          
+          if (item.retryCount < item.maxRetries) {
+            item.retryCount++;
+            item.state = 'pending';
+            progressTracker.updateProgress(
+              item.videoId,
+              'initialization',
+              0,
+              `Retrying (${item.retryCount}/${item.maxRetries})`,
+              'Waiting for retry'
+            );
+          } else {
+            item.state = 'failed';
+            progressTracker.reportError(
+              item.videoId, 
+              `Failed to process video after ${item.maxRetries} attempts: ${item.error}`
+            );
+          }
+        }).finally(() => {
+          this.processing.delete(item.videoId);
+          this.sortQueue();
+        });
+      }
+    }
   }
 
   private async processItem(item: QueueItem): Promise<void> {
@@ -123,7 +183,10 @@ export class ProcessingQueue extends EventEmitter {
   }
 
   isQueued(videoId: string): boolean {
-    return this.queue.some(item => item.videoId === videoId);
+    return this.queue.some(item => 
+      item.videoId === videoId && 
+      (item.state === 'pending' || item.state === 'processing')
+    );
   }
 
   isProcessing(videoId: string): boolean {
@@ -131,24 +194,55 @@ export class ProcessingQueue extends EventEmitter {
   }
 
   getQueuePosition(videoId: string): number {
-    const index = this.queue.findIndex(item => item.videoId === videoId);
+    const index = this.queue.findIndex(item => 
+      item.videoId === videoId && 
+      item.state === 'pending'
+    );
     return index === -1 ? -1 : index + 1;
   }
 
-  getQueueStatus(): { queueLength: number; processing: number } {
+  getQueueStatus(): { 
+    queueLength: number; 
+    processing: number;
+    failed: number;
+    completed: number;
+    pendingItems: Array<{ videoId: string; position: number }>;
+  } {
+    const pendingItems = this.queue
+      .filter(item => item.state === 'pending')
+      .map((item, index) => ({
+        videoId: item.videoId,
+        position: index + 1
+      }));
+
     return {
-      queueLength: this.queue.length,
-      processing: this.processing.size
+      queueLength: this.queue.filter(item => item.state === 'pending').length,
+      processing: this.processing.size,
+      failed: this.queue.filter(item => item.state === 'failed').length,
+      completed: this.queue.filter(item => item.state === 'completed').length,
+      pendingItems
     };
   }
 
   removeFromQueue(videoId: string): boolean {
-    const index = this.queue.findIndex(item => item.videoId === videoId);
+    const index = this.queue.findIndex(item => 
+      item.videoId === videoId && 
+      item.state === 'pending'
+    );
+    
     if (index !== -1) {
       this.queue.splice(index, 1);
+      progressTracker.clearProgress(videoId);
+      this.emit('removed', videoId);
       return true;
     }
     return false;
+  }
+
+  shutdown() {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+    }
   }
 }
 

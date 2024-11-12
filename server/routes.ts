@@ -288,18 +288,60 @@ export function registerRoutes(app: Express) {
     try {
       // Check if video is already being processed
       if (processingQueue.isProcessing(videoId) || processingQueue.isQueued(videoId)) {
+        const queueStatus = processingQueue.getQueueStatus();
+        const position = processingQueue.getQueuePosition(videoId);
+        
         return res.status(409).json({
           message: 'Video is already being processed',
-          queuePosition: processingQueue.getQueuePosition(videoId)
+          queuePosition: position,
+          queueStatus: {
+            ahead: position - 1,
+            processing: queueStatus.processing,
+            estimatedWaitTime: position * 2 // Rough estimate: 2 minutes per video
+          }
         });
       }
 
       // Get video metadata before processing
       const metadata = await getVideoMetadata(videoId);
 
-      // Add to processing queue
-      await processingQueue.enqueue(videoId, req.user!.id);
+      // Add to processing queue with normal priority
+      await processingQueue.enqueue(videoId, req.user!.id, 1);
 
+      // Return accepted status with queue information
+      const queueStatus = processingQueue.getQueueStatus();
+      const position = processingQueue.getQueuePosition(videoId);
+      
+      return res.status(202).json({
+        message: 'Video added to processing queue',
+        queueStatus: {
+          position,
+          ahead: position - 1,
+          processing: queueStatus.processing,
+          estimatedWaitTime: position * 2 // Rough estimate: 2 minutes per video
+        }
+      });
+
+    } catch (error) {
+      console.error('Error processing video:', error);
+      if (error instanceof Error) {
+        // Check for specific error types and provide appropriate responses
+        if (error.message.includes('Queue is full')) {
+          return res.status(503).json({
+            message: 'Processing queue is full. Please try again later.',
+            retryAfter: 300 // Suggest retry after 5 minutes
+          });
+        } else if (error.message.includes('already being processed')) {
+          return res.status(409).json({
+            message: 'Video is already being processed',
+            queuePosition: processingQueue.getQueuePosition(videoId)
+          });
+        }
+      }
+      throw error;
+    }
+
+    try {
       // Process video only when it reaches the front of the queue
       audioPath = await downloadAudio(videoId, MAX_VIDEO_DURATION);
       const subtitleData = await transcribeAudio(audioPath);
