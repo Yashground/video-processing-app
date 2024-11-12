@@ -405,37 +405,42 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   }
 
   const textStyles = {
-    container: "px-8 py-6 space-y-8",
+    container: "p-8 space-y-8",
     textContainer: `
       prose 
       prose-zinc 
       dark:prose-invert 
       max-w-none 
-      space-y-6
+      space-y-8
       [&>*]:transition-all
-      [&>*]:duration-200
+      [&>*]:duration-300
     `,
     paragraph: `
       relative
       group
       mb-8
-      leading-[1.9]
+      leading-[1.8]
       tracking-wide
       text-base
       text-foreground/90
-      first-letter:text-lg
+      first-letter:text-xl
       first-letter:font-medium
       first-line:leading-[2]
-      indent-6
+      indent-[1.5em]
       hover:bg-primary/5
       rounded-lg
-      p-4
+      p-8
       transition-all
-      duration-200
+      duration-300
       border-l-2
       border-transparent
       hover:border-primary/20
+      hover:shadow-sm
+      hover:translate-x-1
     `,
+    section: "rounded-lg bg-card/50 p-8 shadow-sm border border-border/10 backdrop-blur-sm hover:bg-card/60 transition-colors duration-300",
+    headingLarge: "text-2xl font-semibold mb-6 text-foreground/90 tracking-tight",
+    headingMedium: "text-xl font-medium mb-4 text-foreground/80",
     sectionDivider: "my-8 border-t border-border/40 w-1/3 mx-auto opacity-50",
     timestamp: `
       absolute 
@@ -450,12 +455,9 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       opacity-0
       group-hover:opacity-100
       transition-opacity
-      duration-200
+      duration-300
     `,
-    section: "rounded-lg bg-card/50 p-6 shadow-sm border border-border/10 backdrop-blur-sm",
-    headingLarge: "text-2xl font-semibold mb-4 text-foreground/90 tracking-tight",
-    headingMedium: "text-xl font-medium mb-3 text-foreground/80",
-    groupContainer: "space-y-4 relative",
+    groupContainer: "space-y-6 relative",
   };
 
   const formatTimestamp = (ms: number) => {
@@ -544,34 +546,14 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
             ) : subtitles && subtitles.length > 0 ? (
               <div className={textStyles.container}>
                 <div className={textStyles.textContainer}>
-                  {subtitles.reduce((groups: JSX.Element[], subtitle, index) => {
-                    const currentSubtitle = subtitle;
-                    const nextSubtitle = subtitles[index + 1];
-                    const timeBetweenSubtitles = nextSubtitle ? nextSubtitle.start - currentSubtitle.end : 0;
-                    const isNewSection = timeBetweenSubtitles > 2000; // 2 seconds gap indicates new section
-                    const isNewParagraph = timeBetweenSubtitles > 1000; // 1 second gap indicates new paragraph
-
-                    const formattedTime = formatTimestamp(currentSubtitle.start);
-                    
-                    const element = (
-                      <div 
-                        key={`subtitle-${currentSubtitle.start}-${currentSubtitle.end}-${index}`} 
-                        className={`${textStyles.groupContainer} group`}
-                      >
-                        <div className={textStyles.paragraph}>
-                          <span className={`${textStyles.timestamp} opacity-0 group-hover:opacity-100 transition-opacity duration-200 mr-3`}>
-                            [{formattedTime}]
-                          </span>
-                          <span>{currentSubtitle.text}</span>
-                        </div>
-                        {isNewSection && <div className={textStyles.sectionDivider} />}
-                        {isNewParagraph && !isNewSection && <div className="my-4" />}
-                      </div>
-                    );
-                    
-                    groups.push(element);
-                    return groups;
-                  }, [])}
+                  {subtitles.map((subtitle, index) => (
+                    <div key={subtitle.start} className={textStyles.paragraph}>
+                      <span className={textStyles.timestamp}>
+                        {formatTimestamp(subtitle.start)}
+                      </span>
+                      {subtitle.text}
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : (

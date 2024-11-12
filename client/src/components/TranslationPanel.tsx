@@ -33,38 +33,42 @@ const SUPPORTED_LANGUAGES = {
 };
 
 const textStyles = {
-  container: "px-8 py-6 space-y-8",
+  container: "p-8 space-y-8",
   textContainer: `
     prose 
     prose-zinc 
     dark:prose-invert 
     max-w-none 
-    space-y-6
+    space-y-8
     [&>*]:transition-all
-    [&>*]:duration-200
+    [&>*]:duration-300
   `,
   paragraph: `
+    relative
+    group
     mb-8
-    leading-[1.9]
+    leading-[1.8]
     tracking-wide
     text-base
     text-foreground/90
-    first-letter:text-lg
+    first-letter:text-xl
     first-letter:font-medium
     first-line:leading-[2]
-    indent-6
+    indent-[1.5em]
     hover:bg-primary/5
     rounded-lg
-    p-4
+    p-8
     transition-all
-    duration-200
+    duration-300
     border-l-2
     border-transparent
     hover:border-primary/20
+    hover:shadow-sm
+    hover:translate-x-1
   `,
-  section: "rounded-lg bg-card/50 p-6 shadow-sm border border-border/10 backdrop-blur-sm",
-  headingLarge: "text-2xl font-semibold mb-4 text-foreground/90",
-  headingMedium: "text-xl font-medium mb-3 text-foreground/80",
+  section: "rounded-lg bg-card/50 p-8 shadow-sm border border-border/10 backdrop-blur-sm hover:bg-card/60 transition-colors duration-300",
+  headingLarge: "text-2xl font-semibold mb-6 text-foreground/90 tracking-tight",
+  headingMedium: "text-xl font-medium mb-4 text-foreground/80",
   sectionDivider: "my-8 border-t border-border/40 w-1/3 mx-auto opacity-50",
 };
 
@@ -114,10 +118,10 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
 
   return (
     <div className={textStyles.container}>
-      <div className="flex items-center justify-between gap-4 mb-6">
+      <div className="flex items-center justify-between gap-4 mb-8">
         <div className="flex items-center gap-2">
           <Globe className="h-5 w-5 text-primary" />
-          <h3 className={textStyles.headingMedium}>Translation</h3>
+          <h2 className={textStyles.headingMedium}>Translation</h2>
         </div>
         <div className="flex items-center gap-4">
           <Select
@@ -138,7 +142,7 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
           <Button
             onClick={handleTranslate}
             disabled={isTranslating || !text}
-            className="min-w-[120px] bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary"
+            className="min-w-[120px] bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary transition-all duration-300"
           >
             {isTranslating ? (
               <>
@@ -152,7 +156,7 @@ export default function TranslationPanel({ text }: TranslationPanelProps) {
         </div>
       </div>
 
-      <ScrollArea className="h-[300px] rounded-lg border bg-background/50 backdrop-blur-sm">
+      <ScrollArea className="h-[400px] rounded-lg border bg-background/50 backdrop-blur-sm">
         {error ? (
           <div className={textStyles.section}>
             <Alert variant="destructive" className="border-destructive/50 bg-destructive/10">

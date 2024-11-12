@@ -47,7 +47,7 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
 
     const cookies = request.headers.cookie.split(';').reduce((acc: { [key: string]: string }, cookie: string) => {
       const [key, value] = cookie.trim().split('=');
-      acc[key] = decodeURIComponent(value);
+      acc[key.trim()] = decodeURIComponent(value);
       return acc;
     }, {});
 
@@ -56,28 +56,31 @@ export const authenticateWs = async (request: any): Promise<AuthenticatedRequest
       return false;
     }
 
-    const sessionStore = new (createMemoryStore(session))();
-    const sessionData = await new Promise((resolve) => {
-      sessionStore.get(sessionId, (err, session) => {
-        resolve(session);
+    const store = new (createMemoryStore(session))({
+      checkPeriod: 86400000
+    });
+
+    const sessionData: any = await new Promise((resolve) => {
+      store.get(sessionId, (err, session) => {
+        resolve(session || null);
       });
     });
 
-    if (!sessionData || !sessionData.userId) {
+    if (!sessionData || !sessionData.passport?.user) {
       return false;
     }
 
     const [user] = await db
       .select()
       .from(users)
-      .where(eq(users.id, sessionData.userId))
+      .where(eq(users.id, sessionData.passport.user))
       .limit(1);
 
     if (!user) {
       return false;
     }
 
-    return { ...request, user, session: sessionData } as AuthenticatedRequest;
+    return { ...request, user, session: { ...sessionData, userId: user.id } } as AuthenticatedRequest;
   } catch (error) {
     console.error('WebSocket authentication error:', error);
     return false;
