@@ -41,6 +41,9 @@ if (cluster.isPrimary) {
 } else {
   const app = express();
 
+  // Configure trust proxy settings for rate limiting behind proxy
+  app.set('trust proxy', true);
+
   // Global error handler
   const errorHandler = (err: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error('Server error:', err);
@@ -72,20 +75,20 @@ if (cluster.isPrimary) {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: false, limit: '50mb' }));
 
-  // Apply rate limiting middleware
-  app.use('/api/', apiLimiter); // General API rate limit
-  app.use('/api/subtitles', processingLimiter); // Video processing rate limit
-  app.use('/api/translate', aiOperationsLimiter); // Translation rate limit
-  app.use('/api/summarize', aiOperationsLimiter); // Summarization rate limit
-  app.use('/api/cache', cacheLimiter); // Cache operations rate limit
-  app.use('/api/ws', wsRateLimit); // WebSocket rate limit
+  // Apply rate limiting middleware with proper headers
+  app.use('/api/', apiLimiter);
+  app.use('/api/subtitles', processingLimiter);
+  app.use('/api/translate', aiOperationsLimiter);
+  app.use('/api/summarize', aiOperationsLimiter);
+  app.use('/api/cache', cacheLimiter);
+  app.use('/api/ws', wsRateLimit);
   
   // Create server with proper timeouts
   const server = createServer(app);
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
 
-  // Initialize WebSocket for progress tracking with authentication
+  // Initialize WebSocket for progress tracking with authentication and improved error handling
   progressTracker.initializeWebSocket(server, authenticateWs);
 
   // Setup authentication first

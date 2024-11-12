@@ -301,26 +301,30 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const [videoDuration, setVideoDuration] = useState(0);
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
   const { toast } = useToast();
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
 
-  // WebSocket Configuration
+  // WebSocket Configuration with improved retry logic
   const WS_CONFIG = {
     connectionTimeout: 15000,
-    maxRetries: 10,
-    minReconnectionDelay: 1000,
+    maxRetries: 5,
+    minReconnectionDelay: 2000,
     maxReconnectionDelay: 30000,
     reconnectionDelayGrowFactor: 1.5,
-    heartbeatInterval: 10000,
+    heartbeatInterval: 30000,
   };
   
   const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
     videoId ? `/api/subtitles/${videoId}` : null,
     {
       onSuccess: (data) => {
-        if (data && data.length > 0) {
+        if (Array.isArray(data) && data.length > 0) {
           const text = data.map(sub => sub.text.trim()).join(' ');
           setWordCount(text.split(/\s+/).length);
           const lastSubtitle = data[data.length - 1];
           setVideoDuration(lastSubtitle.end / 1000);
+          if (onTextUpdate) {
+            onTextUpdate(text);
+          }
         }
       },
       onError: (err) => {
@@ -339,7 +343,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
           variant: "destructive"
         });
       },
-      shouldRetryOnError: false
+      shouldRetryOnError: false,
+      revalidateOnFocus: false
     }
   );
 
@@ -379,7 +384,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         timestamp: Date.now()
       }));
 
-      // Start heartbeat
+      // Start heartbeat with increased interval
       const heartbeatInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           try {
@@ -411,7 +416,7 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         }
 
         if (data.type === 'auth_required') {
-          // Trigger token refresh
+          // Trigger token refresh and reconnect
           mutate('/api/user').then(() => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.reconnect();
@@ -442,6 +447,12 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       
       if (event.code !== 1000) {
         setWsRetrying(true);
+        // Implement exponential backoff for reconnection
+        const delay = Math.min(1000 * Math.pow(2, retryCount), WS_CONFIG.maxReconnectionDelay);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          setRetryCount(prev => prev + 1);
+          handleReconnect();
+        }, delay);
       }
     });
 
@@ -489,12 +500,29 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       if (wsRef.current) {
         wsRef.current.close(1000, "Cleanup");
         clearInterval(wsRef.current.heartbeatInterval);
-        wsRef.current = null;
       }
-      setWsConnected(false);
-      setWsRetrying(false);
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
     };
   }, [videoId, isAuthenticated]);
+
+  // Handle subtitles rendering
+  if (!videoId) {
+    return null;
+  }
+
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-5 w-5" />
+        <AlertTitle>Error</AlertTitle>
+        <AlertDescription>
+          {error.message || "Failed to load subtitles"}
+        </AlertDescription>
+      </Alert>
+    );
+  }
 
   const generateUniqueKey = (videoId: string, timestamp: number) => {
     return `${videoId}-${timestamp}-${Math.random().toString(36).substr(2, 9)}`;
