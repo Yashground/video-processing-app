@@ -31,12 +31,12 @@ class ProgressTracker extends EventEmitter {
   private static instance: ProgressTracker;
   private wss: WebSocketServer | null = null;
   private progressMap: Map<string, ProgressUpdate> = new Map();
-  private readonly HEARTBEAT_INTERVAL = 10000;
-  private readonly HEARTBEAT_TIMEOUT = 30000;
+  private readonly HEARTBEAT_INTERVAL = 15000; // Reduced from 30000
+  private readonly HEARTBEAT_TIMEOUT = 45000; // Increased from 30000
   private readonly MAX_CLIENTS_PER_USER = 5;
-  private readonly MAX_POOL_SIZE = 1000;
-  private readonly POOL_REBALANCE_INTERVAL = 60000;
-  private readonly STALE_CONNECTION_TIMEOUT = 300000; // 5 minutes
+  private readonly MAX_POOL_SIZE = 500; // Reduced from 1000
+  private readonly POOL_REBALANCE_INTERVAL = 30000; // Reduced from 60000
+  private readonly STALE_CONNECTION_TIMEOUT = 180000; // Reduced from 300000
 
   private userConnections: Map<string, Set<WebSocketWithId>> = new Map();
   private connectionPools: Map<string, ConnectionPool> = new Map();
@@ -63,43 +63,71 @@ class ProgressTracker extends EventEmitter {
   private rebalanceConnectionPools() {
     const now = Date.now();
     
-    // Clean up stale connections first
+    // Clean up stale connections
     for (const [poolId, pool] of this.connectionPools) {
-      for (const ws of pool.connections) {
-        if (now - (ws.lastPing || 0) > this.STALE_CONNECTION_TIMEOUT) {
-          console.log(`Cleaning up stale connection in pool ${poolId}`);
-          this.cleanup(ws);
-        }
+      const staleConnections = Array.from(pool.connections)
+        .filter(ws => now - (ws.lastPing || 0) > this.STALE_CONNECTION_TIMEOUT);
+      
+      for (const ws of staleConnections) {
+        console.log(`Cleaning up stale connection in pool ${poolId}`);
+        this.cleanup(ws);
       }
       
-      // Remove empty pools
       if (pool.connections.size === 0) {
         this.connectionPools.delete(poolId);
+        continue;
+      }
+
+      // Check pool health
+      if (now - pool.lastBalanced > this.POOL_REBALANCE_INTERVAL * 2) {
+        console.log(`Pool ${poolId} hasn't been balanced recently, forcing rebalance`);
+        this.redistributeConnections(pool);
       }
     }
 
-    // Rebalance connections across pools
+    // Balance load across pools
+    this.balancePoolLoad();
+  }
+
+  private redistributeConnections(sourcePool: ConnectionPool) {
+    const connections = Array.from(sourcePool.connections);
+    const targetPools = Array.from(this.connectionPools.values())
+      .filter(p => p.id !== sourcePool.id && p.connections.size < this.MAX_POOL_SIZE);
+    
+    if (targetPools.length === 0) return;
+
+    for (let i = 0; i < connections.length; i++) {
+      const targetPool = targetPools[i % targetPools.length];
+      const conn = connections[i];
+      
+      sourcePool.connections.delete(conn);
+      targetPool.connections.add(conn);
+    }
+  }
+
+  private balancePoolLoad() {
     const pools = Array.from(this.connectionPools.values());
     if (pools.length < 2) return;
 
-    const avgPoolSize = Math.floor(pools.reduce((sum, pool) => sum + pool.connections.size, 0) / pools.length);
+    const avgPoolSize = Math.floor(
+      pools.reduce((sum, pool) => sum + pool.connections.size, 0) / pools.length
+    );
     
     for (const pool of pools) {
-      if (pool.connections.size > avgPoolSize + 5) { // Allow some deviation
-        // Move excess connections to smaller pools
-        const excessConnections = Array.from(pool.connections).slice(avgPoolSize);
-        const smallerPools = pools.filter(p => p.connections.size < avgPoolSize);
+      if (pool.connections.size > avgPoolSize + 3) { // Reduced threshold from 5
+        const excessConnections = Array.from(pool.connections)
+          .slice(avgPoolSize)
+          .slice(0, pool.connections.size - avgPoolSize);
         
         for (const conn of excessConnections) {
-          const targetPool = smallerPools.find(p => p.connections.size < avgPoolSize);
+          const targetPool = pools.find(p => p.connections.size < avgPoolSize);
           if (targetPool) {
             pool.connections.delete(conn);
             targetPool.connections.add(conn);
-            console.log(`Rebalanced connection from pool ${pool.id} to ${targetPool.id}`);
           }
         }
       }
-      pool.lastBalanced = now;
+      pool.lastBalanced = Date.now();
     }
   }
 
@@ -166,6 +194,12 @@ class ProgressTracker extends EventEmitter {
           }
 
           const userId = authResult.user?.id;
+          if (!userId) {
+            console.error('No user ID in authentication result');
+            callback(false, 401, 'Invalid user');
+            return;
+          }
+
           const userConnections = this.userConnections.get(userId) || new Set();
           if (userConnections.size >= this.MAX_CLIENTS_PER_USER) {
             console.error(`Too many connections for user ${userId}`);
@@ -173,11 +207,7 @@ class ProgressTracker extends EventEmitter {
             return;
           }
 
-          Object.assign(info.req, {
-            user: authResult.user,
-            session: authResult.session
-          });
-
+          Object.assign(info.req, { user: authResult.user, session: authResult.session });
           callback(true);
         } catch (error) {
           console.error('WebSocket authentication error:', error);
@@ -188,10 +218,14 @@ class ProgressTracker extends EventEmitter {
 
     this.wss.on('connection', (ws: WebSocketWithId, req: AuthenticatedRequest) => {
       const userId = req.user?.id;
+      if (!userId) {
+        ws.close(1011, 'Authentication failed');
+        return;
+      }
+
       console.log('New WebSocket connection established for user:', userId);
 
-      // Set up connection tracking
-      ws.id = Math.random().toString(36).substring(2, 15);
+      ws.id = `${userId}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
       ws.userId = userId;
       ws.isAlive = true;
       ws.lastPing = Date.now();
@@ -201,53 +235,21 @@ class ProgressTracker extends EventEmitter {
       pool.connections.add(ws);
 
       // Add to user connections
-      if (userId) {
-        if (!this.userConnections.has(userId)) {
-          this.userConnections.set(userId, new Set());
-        }
-        this.userConnections.get(userId)?.add(ws);
+      if (!this.userConnections.has(userId)) {
+        this.userConnections.set(userId, new Set());
       }
+      this.userConnections.get(userId)?.add(ws);
 
-      // Set up heartbeat handling
+      // Setup heartbeat handling
       this.handleHeartbeat(ws);
 
-      // Send initial progress state
-      this.progressMap.forEach((progress) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          try {
-            ws.send(JSON.stringify({
-              type: 'progress',
-              ...progress
-            }));
-          } catch (error) {
-            console.error('Error sending initial progress:', error);
-          }
-        }
-      });
+      // Send initial state
+      if (ws.readyState === WebSocket.OPEN) {
+        this.sendInitialState(ws);
+      }
 
-      // Handle incoming messages
-      ws.on('message', (data) => {
-        try {
-          const message = JSON.parse(data.toString());
-          
-          if (message.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
-            this.handleHeartbeat(ws);
-          }
-
-          if (message.type === 'init' && message.videoId) {
-            const progress = this.progressMap.get(message.videoId);
-            if (progress) {
-              ws.send(JSON.stringify({
-                type: 'progress',
-                ...progress
-              }));
-            }
-          }
-        } catch (error) {
-          console.error('Error handling WebSocket message:', error);
-        }
-      });
+      // Handle messages
+      ws.on('message', (data) => this.handleMessage(ws, data));
 
       // Handle connection close
       ws.on('close', () => {
@@ -275,6 +277,47 @@ class ProgressTracker extends EventEmitter {
         ...update
       }));
     });
+  }
+
+  private sendInitialState(ws: WebSocketWithId) {
+    try {
+      this.progressMap.forEach((progress) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'progress',
+            ...progress
+          }));
+        }
+      });
+    } catch (error) {
+      console.error('Error sending initial state:', error);
+    }
+  }
+
+  private handleMessage(ws: WebSocketWithId, data: any) {
+    try {
+      const message = JSON.parse(data.toString());
+      
+      if (message.type === 'ping') {
+        ws.send(JSON.stringify({ 
+          type: 'pong',
+          timestamp: Date.now()
+        }));
+        this.handleHeartbeat(ws);
+      }
+
+      if (message.type === 'init' && message.videoId) {
+        const progress = this.progressMap.get(message.videoId);
+        if (progress && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'progress',
+            ...progress
+          }));
+        }
+      }
+    } catch (error) {
+      console.error('Error handling WebSocket message:', error);
+    }
   }
 
   private cleanup(ws: WebSocketWithId) {

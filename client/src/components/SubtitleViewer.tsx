@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, Component, ErrorInfo } from "react";
+import { useEffect, useState, useRef, Component, ErrorInfo, useCallback } from "react";
 import ReconnectingWebSocket from 'reconnecting-websocket';
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -302,72 +302,51 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
   const wsRef = useRef<ReconnectingWebSocket | null>(null);
   const { toast } = useToast();
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const maxRetries = 5;
 
-  // WebSocket Configuration with improved retry logic
+  // WebSocket Configuration
   const WS_CONFIG = {
-    connectionTimeout: 15000,
-    maxRetries: 5,
-    minReconnectionDelay: 2000,
-    maxReconnectionDelay: 30000,
-    reconnectionDelayGrowFactor: 1.5,
-    heartbeatInterval: 30000,
+    connectionTimeout: 10000, // Reduced from 15000
+    maxRetries: maxRetries,
+    minReconnectionDelay: 1000,
+    maxReconnectionDelay: 10000, // Reduced from 30000
+    reconnectionDelayGrowFactor: 1.3, // Reduced from 1.5
+    heartbeatInterval: 15000, // Reduced from 30000
   };
-  
-  const { data: subtitles, error, isValidating } = useSWR<Subtitle[]>(
-    videoId ? `/api/subtitles/${videoId}` : null,
-    {
-      onSuccess: (data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const text = data.map(sub => sub.text.trim()).join(' ');
-          setWordCount(text.split(/\s+/).length);
-          const lastSubtitle = data[data.length - 1];
-          setVideoDuration(lastSubtitle.end / 1000);
-          if (onTextUpdate) {
-            onTextUpdate(text);
-          }
-        }
-      },
-      onError: (err) => {
-        let errorMessage = "Failed to process audio.";
-        if (err.message?.includes("too large") || err.message?.includes("maxFilesize")) {
-          errorMessage = "Audio file is too large (max 100MB). Please try a shorter video.";
-        } else if (err.message?.includes("duration") || err.message?.includes("maximum limit")) {
-          errorMessage = "Video is too long. Maximum supported duration is 2 hours.";
-        } else if (err.message?.includes("unavailable") || err.message?.includes("private")) {
-          errorMessage = "Video is unavailable or private. Please try another video.";
-        }
-        
-        toast({
-          title: "Audio Processing Error",
-          description: errorMessage,
-          variant: "destructive"
-        });
-      },
-      shouldRetryOnError: false,
-      revalidateOnFocus: false
-    }
-  );
 
-  // Add authentication check
-  const { data: user, error: authError } = useSWR('/api/user');
+  // Add authentication state management
+  const { data: user, error: authError, mutate: mutateUser } = useSWR('/api/user');
   const isAuthenticated = !!user && !authError;
 
-  const connectWebSocket = () => {
+  const handleReconnect = useCallback(() => {
+    if (!wsRef.current || retryCount >= maxRetries) return;
+    
+    setWsRetrying(true);
+    const delay = Math.min(1000 * Math.pow(1.5, retryCount), WS_CONFIG.maxReconnectionDelay);
+    
+    reconnectTimeoutRef.current = setTimeout(() => {
+      if (wsRef.current) {
+        wsRef.current.reconnect();
+      }
+    }, delay);
+  }, [retryCount, maxRetries]);
+
+  const connectWebSocket = useCallback(() => {
     if (!videoId || !isAuthenticated || wsRef.current) return;
 
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/api/ws/progress`;
     
-    const options = {
+    console.log('Connecting to WebSocket:', wsUrl);
+    
+    const ws = new ReconnectingWebSocket(wsUrl, [], {
       connectionTimeout: WS_CONFIG.connectionTimeout,
       maxRetries: WS_CONFIG.maxRetries,
       minReconnectionDelay: WS_CONFIG.minReconnectionDelay,
       maxReconnectionDelay: WS_CONFIG.maxReconnectionDelay,
       reconnectionDelayGrowFactor: WS_CONFIG.reconnectionDelayGrowFactor,
-    };
+    });
 
-    console.log('Connecting to WebSocket:', wsUrl);
-    const ws = new ReconnectingWebSocket(wsUrl, [], options);
     wsRef.current = ws;
 
     ws.addEventListener('open', () => {
@@ -377,32 +356,28 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       setWsError(null);
       setRetryCount(0);
 
-      // Send initialization message
+      // Send initialization message with auth token
       ws.send(JSON.stringify({
         type: 'init',
         videoId,
         timestamp: Date.now()
       }));
 
-      // Start heartbeat with increased interval
+      // Setup heartbeat
       const heartbeatInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           try {
-            ws.send(JSON.stringify({
-              type: 'ping',
-              videoId,
-              timestamp: Date.now()
-            }));
+            ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
           } catch (error) {
-            console.error('Error sending heartbeat:', error);
+            console.error('Heartbeat error:', error);
             clearInterval(heartbeatInterval);
+            handleReconnect();
           }
         } else {
           clearInterval(heartbeatInterval);
         }
       }, WS_CONFIG.heartbeatInterval);
 
-      // Store interval for cleanup
       ws.heartbeatInterval = heartbeatInterval;
     });
 
@@ -416,8 +391,8 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
         }
 
         if (data.type === 'auth_required') {
-          // Trigger token refresh and reconnect
-          mutate('/api/user').then(() => {
+          console.log('Authentication refresh required');
+          mutateUser().then(() => {
             if (ws.readyState === WebSocket.OPEN) {
               ws.reconnect();
             }
@@ -445,67 +420,68 @@ export default function SubtitleViewer({ videoId, onTextUpdate }: SubtitleViewer
       setWsConnected(false);
       clearInterval(ws.heartbeatInterval);
       
-      if (event.code !== 1000) {
+      if (event.code === 1000) {
+        // Normal closure
+        console.log('WebSocket closed normally');
+        return;
+      }
+
+      if (event.code === 1006 || event.code === 1015) {
         setWsRetrying(true);
-        // Implement exponential backoff for reconnection
-        const delay = Math.min(1000 * Math.pow(2, retryCount), WS_CONFIG.maxReconnectionDelay);
-        reconnectTimeoutRef.current = setTimeout(() => {
-          setRetryCount(prev => prev + 1);
+        if (retryCount < maxRetries) {
+          console.log(`Retrying connection in ${Math.pow(1.5, retryCount)}s (attempt ${retryCount + 1}/${maxRetries})`);
           handleReconnect();
-        }, delay);
+        } else {
+          console.error('Max retry attempts reached');
+          setWsError(new Error('Unable to establish connection after multiple attempts'));
+        }
       }
     });
 
     ws.addEventListener('error', (event) => {
+      const errorMessage = event instanceof Error ? event.message : 'Connection error occurred';
       console.error('WebSocket error:', event);
-      handleWebSocketError(event instanceof Error ? event : new Error('Connection error occurred'));
+      
+      if (errorMessage.includes('401') || errorMessage.includes('Authentication failed')) {
+        mutateUser().then(() => {
+          if (retryCount < maxRetries) {
+            handleReconnect();
+          }
+        });
+      } else if (retryCount === 0) {
+        console.error('Initial WebSocket connection failed:', event);
+      } else {
+        console.error('Retry failed:', event);
+      }
+      
+      setWsError(new Error(errorMessage));
+      setWsConnected(false);
     });
-  };
-
-  const handleWebSocketError = (error: Error | Event) => {
-    console.error('WebSocket error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Connection error occurred';
-    setWsError(new Error(errorMessage));
-    setWsConnected(false);
-
-    if (errorMessage.includes('401') || errorMessage.includes('Authentication failed')) {
-      toast({
-        title: "Authentication Error",
-        description: "Please log in to continue.",
-        variant: "destructive"
-      });
-      window.location.href = '/login';
-      return;
-    }
-
-    toast({
-      title: "Connection Error",
-      description: `${errorMessage}. Attempting to reconnect...`,
-      variant: "destructive"
-    });
-  };
-
-  const handleReconnect = () => {
-    if (wsRef.current) {
-      wsRef.current.reconnect();
-    } else {
-      connectWebSocket();
-    }
-  };
-
-  useEffect(() => {
-    connectWebSocket();
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close(1000, "Cleanup");
-        clearInterval(wsRef.current.heartbeatInterval);
-      }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
+      if (ws.heartbeatInterval) {
+        clearInterval(ws.heartbeatInterval);
+      }
+      ws.close(1000, "Cleanup");
     };
-  }, [videoId, isAuthenticated]);
+  }, [videoId, isAuthenticated, retryCount, maxRetries, handleReconnect, mutateUser]);
+
+  // Effect for connection management
+  useEffect(() => {
+    if (videoId && isAuthenticated) {
+      connectWebSocket();
+    }
+    
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close(1000, "Normal closure");
+        wsRef.current = null;
+      }
+    };
+  }, [videoId, isAuthenticated, connectWebSocket]);
 
   // Handle subtitles rendering
   if (!videoId) {
